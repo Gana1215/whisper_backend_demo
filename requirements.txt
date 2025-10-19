@@ -19,3 +19,6 @@ pydantic==2.9.2
 
 # Optional — install if using numpy explicitly or as dependency
 numpy>=1.24.0
+#Memory utils
+psutil==5.9.8
+
