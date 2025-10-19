@@ -11,22 +11,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from faster_whisper import WhisperModel
 import soundfile as sf  # for quick duration guard
+import logging
+
+# -------- Logging Setup --------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # -------- Config --------
 MODEL_DIR = os.getenv("MODEL_DIR", "models/MN_Whisper_Small_CT2")
-DEVICE = os.getenv("DEVICE", "cpu")              # "cpu" or "cuda"
-COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8") # cpu: int8/float32; gpu: float16/int8_float16
-
-# Optional guards for the Hobby plan (adjust if you upgrade later)
+DEVICE = os.getenv("DEVICE", "cpu")               # "cpu" or "cuda"
+COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")  # cpu: int8/float32; gpu: float16/int8_float16
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))  # 10 MB
-MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))              # 30 sec
+MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))               # 30 sec
 
 # -------- FastAPI setup --------
 app = FastAPI(title="Mongolian Whisper API", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # lock down to your frontend domain in prod
+    allow_origins=["*"],  # lock down to your frontend domain in prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -45,7 +47,8 @@ def load_model():
     if not os.path.isdir(MODEL_DIR):
         raise RuntimeError(f"Model folder not found: {MODEL_DIR}")
 
-    # Keep memory low for Render Hobby plan
+    logging.info(f"🔄 Loading model from {MODEL_DIR} (device={DEVICE}, compute={COMPUTE_TYPE})")
+
     model = WhisperModel(
         MODEL_DIR,
         device=DEVICE,
@@ -53,7 +56,8 @@ def load_model():
         cpu_threads=1,   # minimize RAM spikes
         num_workers=1
     )
-    print(f"✅ Model loaded: {MODEL_DIR} | device: {DEVICE} | compute: {COMPUTE_TYPE}")
+
+    logging.info(f"✅ Model loaded successfully: {MODEL_DIR} | device={DEVICE} | compute={COMPUTE_TYPE}")
 
 
 # -------- Health check --------
@@ -91,6 +95,7 @@ async def transcribe(file: UploadFile = File(...)):
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(await file.read())
             tmp_path = tmp.name
+        logging.info(f"📥 Received file: {file.filename} -> {tmp_path}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to read uploaded file: {e}")
 
@@ -110,6 +115,7 @@ async def transcribe(file: UploadFile = File(...)):
 
     # --- Inference ---
     try:
+        logging.info(f"🎧 Starting transcription (duration={dur:.1f}s)")
         segments, info = model.transcribe(
             tmp_path,
             language="mn",
@@ -121,6 +127,7 @@ async def transcribe(file: UploadFile = File(...)):
             word_timestamps=False
         )
         text = "".join(seg.text for seg in segments).strip()
+        logging.info(f"✅ Transcription complete: {len(text)} chars")
         return TranscribeResult(
             text=text,
             language=getattr(info, "language", "mn"),
@@ -129,9 +136,19 @@ async def transcribe(file: UploadFile = File(...)):
     except HTTPException:
         raise
     except Exception as e:
+        logging.error(f"❌ Inference error: {e}")
         raise HTTPException(status_code=500, detail=f"Inference error: {e}")
     finally:
         try:
             os.remove(tmp_path)
+            logging.info(f"🧹 Temp file removed: {tmp_path}")
         except Exception:
             pass
+
+
+# -------- Local entrypoint (for dev / Render) --------
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))  # Render injects $PORT automatically
+    logging.info(f"🚀 Starting server on port {port}")
+    uvicorn.run("app:app", host="0.0.0.0", port=port)
