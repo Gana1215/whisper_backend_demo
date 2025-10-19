@@ -1,5 +1,11 @@
+# ===============================================
+# 🎙️ Mongolian Whisper API (FastAPI + Faster-Whisper)
+# Compatible with Python 3.9+
+# ===============================================
+
 import os
 import tempfile
+from typing import Optional
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -15,60 +21,71 @@ COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8") # cpu: int8/float32; gpu: float
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))  # 10 MB
 MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))              # 30 sec
 
+# -------- FastAPI setup --------
 app = FastAPI(title="Mongolian Whisper API", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],     # lock down to your frontend domain in prod
+    allow_origins=["*"],      # lock down to your frontend domain in prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------- Model load on startup (once) --------
-model: WhisperModel | None = None
+# -------- Model holder --------
+model: Optional[WhisperModel] = None
 
+
+# -------- Model load on startup (once) --------
 @app.on_event("startup")
 def load_model():
+    """Load Faster-Whisper model once at startup."""
     global model
-    # Removed any PyTorch .bin existence checks — we load CT2/faster-whisper directly
+
     if not os.path.isdir(MODEL_DIR):
         raise RuntimeError(f"Model folder not found: {MODEL_DIR}")
 
-    # These limits help stay under 512 MB on the Hobby plan
+    # Keep memory low for Render Hobby plan
     model = WhisperModel(
         MODEL_DIR,
         device=DEVICE,
         compute_type=COMPUTE_TYPE,
-        cpu_threads=1,   # keep small to reduce RAM spikes
-        num_workers=1    # single worker to avoid duplicating model in memory
+        cpu_threads=1,   # minimize RAM spikes
+        num_workers=1
     )
     print(f"✅ Model loaded: {MODEL_DIR} | device: {DEVICE} | compute: {COMPUTE_TYPE}")
 
+
+# -------- Health check --------
 @app.get("/")
 def health():
     return {"ok": True, "msg": "Mongolian Whisper API is running."}
 
+
+# -------- Response schema --------
 class TranscribeResult(BaseModel):
     text: str
-    language: str | None = None
-    duration_sec: float | None = None
+    language: Optional[str] = None
+    duration_sec: Optional[float] = None
 
+
+# -------- Main endpoint --------
 @app.post("/transcribe", response_model=TranscribeResult)
 async def transcribe(file: UploadFile = File(...)):
+    """Receive an audio file and return transcription."""
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
-    # Basic content-type check
+    # --- MIME guard ---
     if not (file.content_type or "").startswith("audio/"):
         raise HTTPException(status_code=415, detail=f"Unsupported content type: {file.content_type}")
 
-    # Size guard (if client provided length header; not always present)
+    # --- Size guard ---
     cl = getattr(file, "size", None)
     if cl and cl > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"File too large. Limit is {MAX_UPLOAD_BYTES // (1024*1024)} MB.")
 
-    # Save to temp file
+    # --- Save to temp file ---
     try:
         suffix = os.path.splitext(file.filename or "")[-1] or ".wav"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -77,7 +94,7 @@ async def transcribe(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to read uploaded file: {e}")
 
-    # Optional duration guard to avoid OOM on long audio
+    # --- Duration guard ---
     try:
         audio, sr = sf.read(tmp_path, dtype="float32", always_2d=False)
         dur = len(audio) / float(sr)
@@ -87,26 +104,28 @@ async def transcribe(file: UploadFile = File(...)):
                 detail=f"Audio too long ({dur:.1f}s). Limit is {MAX_DURATION_SEC:.0f}s on the Hobby plan."
             )
     except HTTPException:
-        # forward size/duration specific errors
         raise
     except Exception:
-        # If we can’t read duration, proceed — decoder will still try
-        dur = None
+        dur = None  # if unreadable, continue anyway
 
-    # Inference (greedy decode to minimize memory)
+    # --- Inference ---
     try:
         segments, info = model.transcribe(
             tmp_path,
-            language="mn",          # Mongolian
-            task="transcribe",      # not "translate"
+            language="mn",
+            task="transcribe",
             vad_filter=True,
-            beam_size=1,            # ↓ memory vs. beam search
-            best_of=1,              # ↓ memory vs. best-of
+            beam_size=1,
+            best_of=1,
             temperature=0.0,
             word_timestamps=False
         )
         text = "".join(seg.text for seg in segments).strip()
-        return TranscribeResult(text=text, language=info.language, duration_sec=info.duration if hasattr(info, "duration") else dur)
+        return TranscribeResult(
+            text=text,
+            language=getattr(info, "language", "mn"),
+            duration_sec=getattr(info, "duration", dur)
+        )
     except HTTPException:
         raise
     except Exception as e:
