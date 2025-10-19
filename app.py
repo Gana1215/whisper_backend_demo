@@ -1,38 +1,47 @@
 # ===============================================
 # 🎙️ Mongolian Whisper API (FastAPI + Faster-Whisper)
+# + Memory Usage Logger for Render Diagnostics
 # Compatible with Python 3.9+
 # ===============================================
 
 import os
 import tempfile
+import psutil  # <--- NEW for memory tracking
+import logging
 from typing import Optional
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from faster_whisper import WhisperModel
-import soundfile as sf  # for quick duration guard
-import logging
+import soundfile as sf
 
 # -------- Logging Setup --------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # -------- Config --------
 MODEL_DIR = os.getenv("MODEL_DIR", "models/MN_Whisper_Small_CT2")
-DEVICE = os.getenv("DEVICE", "cpu")               # "cpu" or "cuda"
-COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")  # cpu: int8/float32; gpu: float16/int8_float16
+DEVICE = os.getenv("DEVICE", "cpu")
+COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))  # 10 MB
-MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))               # 30 sec
+MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))  # 30 sec
 
 # -------- FastAPI setup --------
 app = FastAPI(title="Mongolian Whisper API", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # lock down to your frontend domain in prod
+    allow_origins=["*"],  # allow all for now; restrict in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# -------- Helper: Memory Logger --------
+def log_memory(label=""):
+    """Prints current memory usage in MB to logs."""
+    process = psutil.Process(os.getpid())
+    mem_mb = process.memory_info().rss / (1024 * 1024)
+    logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
 
 # -------- Model holder --------
 model: Optional[WhisperModel] = None
@@ -43,6 +52,8 @@ model: Optional[WhisperModel] = None
 def load_model():
     """Load Faster-Whisper model once at startup."""
     global model
+
+    log_memory("Before loading model")
 
     if not os.path.isdir(MODEL_DIR):
         raise RuntimeError(f"Model folder not found: {MODEL_DIR}")
@@ -57,6 +68,7 @@ def load_model():
         num_workers=1
     )
 
+    log_memory("After loading model")
     logging.info(f"✅ Model loaded successfully: {MODEL_DIR} | device={DEVICE} | compute={COMPUTE_TYPE}")
 
 
@@ -80,14 +92,11 @@ async def transcribe(file: UploadFile = File(...)):
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
+    log_memory("Before transcription")
+
     # --- MIME guard ---
     if not (file.content_type or "").startswith("audio/"):
         raise HTTPException(status_code=415, detail=f"Unsupported content type: {file.content_type}")
-
-    # --- Size guard ---
-    cl = getattr(file, "size", None)
-    if cl and cl > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail=f"File too large. Limit is {MAX_UPLOAD_BYTES // (1024*1024)} MB.")
 
     # --- Save to temp file ---
     try:
@@ -111,7 +120,7 @@ async def transcribe(file: UploadFile = File(...)):
     except HTTPException:
         raise
     except Exception:
-        dur = None  # if unreadable, continue anyway
+        dur = None
 
     # --- Inference ---
     try:
@@ -139,6 +148,7 @@ async def transcribe(file: UploadFile = File(...)):
         logging.error(f"❌ Inference error: {e}")
         raise HTTPException(status_code=500, detail=f"Inference error: {e}")
     finally:
+        log_memory("After transcription")
         try:
             os.remove(tmp_path)
             logging.info(f"🧹 Temp file removed: {tmp_path}")
