@@ -22,3 +22,4 @@ numpy>=1.24.0
 #Memory utils
 psutil==5.9.8
 
+pydub
