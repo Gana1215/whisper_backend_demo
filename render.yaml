@@ -4,28 +4,37 @@ services:
     env: python
     plan: starter
     region: oregon
-
     buildCommand: |
-      echo "🚀 Starting build setup..."
-      apt-get update && apt-get install -y ffmpeg
-      echo "📦 Upgrading pip, setuptools, and wheel..."
-      pip install --upgrade pip setuptools wheel
-      echo "🔍 Checking pip version after upgrade:"
-      pip --version
-      echo "📥 Installing dependencies from requirements.txt..."
-      pip install -r requirements.txt
-      echo "✅ Build complete."
+      # 🧠 Ensure git-lfs pulls real model files (not pointer stubs)
+      apt-get update && apt-get install -y git-lfs
+      git lfs install
+      git lfs pull
 
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+      # ⚙️ Upgrade pip to latest to ensure wheel compatibility
+      pip install --upgrade pip
+
+      # 📦 Install project dependencies
+      pip install -r requirements.txt
+
+    startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
 
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.9.6
+      # ✅ Your model directory inside the repo
       - key: MODEL_DIR
         value: models/MN_Whisper_Small_CT2
+
+      # ⚙️ Device configuration (CPU for Render Starter plan)
       - key: DEVICE
         value: cpu
+
+      # ⚙️ Quantization for faster CPU inference
       - key: COMPUTE_TYPE
         value: int8
+
+      # 🧩 Optional diagnostic flag (print memory + LFS verification)
       - key: DIAG
         value: "1"
+
+      # 🐍 Python version
+      - key: PYTHON_VERSION
+        value: 3.9.6
