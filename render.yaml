@@ -7,7 +7,8 @@ services:
     buildCommand: |
       apt-get update && apt-get install -y ffmpeg
       pip install --upgrade pip
-      pip install --upgrade ctranslate2==4.5.0 faster-whisper==1.1.1
+      # Install matching CT2 + faster-whisper versions
+      pip install --upgrade ctranslate2==4.0.0 faster-whisper==1.0.3
       pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
     envVars:
