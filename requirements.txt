@@ -2,7 +2,7 @@
 fastapi==0.115.0
 uvicorn==0.38.0
 
-# Updated Whisper backend (latest supports new CTranslate2)
+# Updated Whisper backend
 faster-whisper==1.1.1
 ctranslate2==4.5.0
 
