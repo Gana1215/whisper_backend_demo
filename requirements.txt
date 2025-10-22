@@ -1,11 +1,15 @@
+# =============================
+# Mongolian Whisper API
+# FastAPI + Faster-Whisper backend (CT2 v4.5 compatible)
+# =============================
+
 # Core framework
 fastapi==0.115.0
 uvicorn==0.38.0
 
-# Updated Whisper backend
-#faster-whisper==1.1.1
-faster-whisper==1.0.3
-#ctranslate2==4.5.0
+# Whisper backend (new model format)
+faster-whisper==1.1.1
+ctranslate2==4.5.0
 
 # Audio & file handling
 soundfile==0.12.1
@@ -15,6 +19,8 @@ python-multipart==0.0.20
 # Schema / validation
 pydantic==2.9.2
 
+# Optional — install if using numpy explicitly or as dependency
+numpy>=1.24.0
+
 # Memory utils
 psutil==5.9.8
-numpy>=1.24.0
