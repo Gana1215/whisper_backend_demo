@@ -1,8 +1,9 @@
 # ===============================================
 # 🎙️ Mongolian Whisper API (FastAPI + Faster-Whisper)
 # ✅ Robust decoding (pydub) + Memory Usage Logger (DIAG toggle)
-# ✅ Adds mobile playback & permanent voice archive
-# Compatible with Python 3.9+
+# ✅ Works on both local & Render environments
+# ✅ Handles mobile uploads (iOS/Android)
+# ✅ Auto-saves uploads + permanent archive
 # ===============================================
 
 import os, tempfile, psutil, logging, time, datetime
@@ -15,8 +16,13 @@ from faster_whisper import WhisperModel
 import soundfile as sf
 from pydub import AudioSegment
 
+# -------- Environment detection --------
+IS_RENDER = os.path.exists("/opt/render")
+BASE_DIR = "/opt/render/project/src" if IS_RENDER else os.getcwd()
+os.chdir(BASE_DIR)
+
 # -------- Config --------
-MODEL_DIR = os.getenv("MODEL_DIR", "models/MN_Whisper_Small_CT2")
+HF_MODEL = os.getenv("HF_MODEL", "gana1215/MN_Whisper_Small_CT2")
 DEVICE = os.getenv("DEVICE", "cpu")
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))
@@ -24,8 +30,8 @@ MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))
 DIAG = os.getenv("DIAG", "0") == "1"
 
 # --- Storage folders ---
-UPLOAD_DIR = "uploads"           # playback (mobile)
-ARCHIVE_DIR = "record_archive"   # permanent storage
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")           # playback (mobile)
+ARCHIVE_DIR = os.path.join(BASE_DIR, "record_archive")   # permanent storage
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
@@ -45,7 +51,7 @@ def log_memory(label=""):
         logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
 
 # -------- FastAPI setup --------
-app = FastAPI(title="Mongolian Whisper API", version="1.2")
+app = FastAPI(title="Mongolian Whisper API", version="1.3")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -59,16 +65,20 @@ model: Optional[WhisperModel] = None
 
 @app.on_event("startup")
 def load_model():
+    """Load Whisper model from Hugging Face or local folder"""
     global model
     log_memory("Before loading model")
-    if not os.path.isdir(MODEL_DIR):
-        raise RuntimeError(f"Model folder not found: {MODEL_DIR}")
 
-    dlog(f"🔄 Loading model from {MODEL_DIR} (device={DEVICE}, compute={COMPUTE_TYPE})")
-    model = WhisperModel(
-        MODEL_DIR, device=DEVICE, compute_type=COMPUTE_TYPE,
-        cpu_threads=1, num_workers=1
-    )
+    try:
+        dlog(f"🔄 Loading model from Hugging Face: {HF_MODEL}")
+        model = WhisperModel(
+            HF_MODEL, device=DEVICE, compute_type=COMPUTE_TYPE,
+            cpu_threads=1, num_workers=1, download_root=BASE_DIR
+        )
+    except Exception as e:
+        logging.error(f"❌ Failed to load model from HF: {e}")
+        raise RuntimeError(f"Failed to load model: {e}")
+
     log_memory("After loading model")
     dlog("✅ Model loaded successfully")
 
@@ -142,10 +152,12 @@ async def transcribe(file: UploadFile = File(...)):
     playback_path = os.path.join(UPLOAD_DIR, playback_filename)
     archive_path = os.path.join(ARCHIVE_DIR, archive_filename)
     try:
-        with open(wav_path, "rb") as src, open(playback_path, "wb") as dst:
-            dst.write(src.read())
-        with open(wav_path, "rb") as src, open(archive_path, "wb") as dst:
-            dst.write(src.read())
+        with open(wav_path, "rb") as src:
+            data = src.read()
+        with open(playback_path, "wb") as dst:
+            dst.write(data)
+        with open(archive_path, "wb") as dst:
+            dst.write(data)
         dlog(f"💾 Saved playback: {playback_path}")
         dlog(f"💾 Saved archive: {archive_path}")
     except Exception as e:

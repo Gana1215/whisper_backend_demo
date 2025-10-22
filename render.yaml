@@ -4,21 +4,19 @@ services:
     env: python
     plan: starter
     region: oregon
+
     buildCommand: |
-      git lfs install
-      git lfs pull
       pip install --upgrade pip
       pip install -r requirements.txt
+
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+
     envVars:
-      - key: MODEL_DIR
-        value: models/MN_Whisper_Small_CT2
+      - key: HF_MODEL
+        value: gana1215/MN_Whisper_Small_CT2
       - key: DEVICE
         value: cpu
       - key: COMPUTE_TYPE
         value: int8
-    aptPackages:
-      - ffmpeg
-      - git
-      - curl
-      - git-lfs
+      - key: DIAG
+        value: "1"
