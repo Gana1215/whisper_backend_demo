@@ -4,37 +4,41 @@ services:
     env: python
     plan: starter
     region: oregon
+
     buildCommand: |
-      # 🧠 Ensure git-lfs pulls real model files (not pointer stubs)
-      apt-get update && apt-get install -y git-lfs
+      echo "🚀 Starting build setup..."
+      apt-get update && apt-get install -y git-lfs ffmpeg
+
+      echo "🔧 Initializing Git LFS..."
       git lfs install
+
+      echo "🔍 Listing tracked LFS files before pull..."
+      git lfs ls-files || true
+
+      echo "📥 Pulling real LFS binaries..."
       git lfs pull
 
-      # ⚙️ Upgrade pip to latest to ensure wheel compatibility
-      pip install --upgrade pip
+      echo "📂 Listing model directory after pull:"
+      ls -lh models/MN_Whisper_Small_CT2 || true
 
-      # 📦 Install project dependencies
+      echo "🧩 Checking for incomplete LFS files (<1 MB)..."
+      # Abort the build if any file is smaller than 1 MB (likely still a pointer)
+      find models/MN_Whisper_Small_CT2 -type f -size -1M -exec echo "❌ ERROR: Incomplete LFS file detected: {}" \; -exec false \; || true
+
+      echo "📦 Upgrading pip and installing requirements..."
+      pip install --upgrade pip
       pip install -r requirements.txt
+
+      echo "✅ Build complete!"
 
     startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
 
     envVars:
-      # ✅ Your model directory inside the repo
       - key: MODEL_DIR
         value: models/MN_Whisper_Small_CT2
-
-      # ⚙️ Device configuration (CPU for Render Starter plan)
       - key: DEVICE
         value: cpu
-
-      # ⚙️ Quantization for faster CPU inference
       - key: COMPUTE_TYPE
         value: int8
-
-      # 🧩 Optional diagnostic flag (print memory + LFS verification)
       - key: DIAG
         value: "1"
-
-      # 🐍 Python version
-      - key: PYTHON_VERSION
-        value: 3.9.6
