@@ -4,13 +4,16 @@
 # ✅ Works on both local & Render environments
 # ✅ Handles mobile uploads (iOS/Android)
 # ✅ Auto-saves uploads + permanent archive
+# ✅ Serves dataset audio from /record_archive/wavs/*
+# ✅ Includes CSV dataset routes (/dataset/*)
 # ===============================================
 
 import os, tempfile, psutil, logging, time, datetime
 from typing import Optional
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from faster_whisper import WhisperModel
 import soundfile as sf
@@ -30,10 +33,13 @@ MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))
 DIAG = os.getenv("DIAG", "0") == "1"
 
 # --- Storage folders ---
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")           # playback (mobile)
-ARCHIVE_DIR = os.path.join(BASE_DIR, "record_archive")   # permanent storage
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")                 # playback (mobile)
+ARCHIVE_DIR = os.path.join(BASE_DIR, "record_archive")         # permanent storage root
+ARCHIVE_WAV_DIR = os.path.join(ARCHIVE_DIR, "wavs")            # <-- dataset manager expects wavs here
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
+os.makedirs(ARCHIVE_WAV_DIR, exist_ok=True)
 
 # -------- Logging --------
 log_level = logging.INFO if DIAG else logging.WARNING
@@ -51,7 +57,7 @@ def log_memory(label=""):
         logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
 
 # -------- FastAPI setup --------
-app = FastAPI(title="Mongolian Whisper API", version="1.3")
+app = FastAPI(title="Mongolian Whisper API", version="1.4")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -59,6 +65,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---- Include CSV dataset routes (optional import safety) ----
+try:
+    from dataset_routes import router as dataset_router
+    app.include_router(dataset_router)
+    dlog("✅ dataset_routes mounted at /dataset/*")
+except Exception as _e:
+    logging.warning("⚠️ dataset_routes not available. /dataset/* endpoints disabled.")
+
+# ---- Static mounts for audio playback (front-end uses these) ----
+# - /uploads/<filename>.wav         (transcribe results)
+# - /record_archive/wavs/<filename> (dataset audio)
+app.mount("/record_archive", StaticFiles(directory=ARCHIVE_DIR), name="record_archive")
 
 # -------- Model --------
 model: Optional[WhisperModel] = None
@@ -97,7 +116,11 @@ class TranscribeResult(BaseModel):
 
 # -------- Main endpoint --------
 @app.post("/transcribe", response_model=TranscribeResult)
-async def transcribe(file: UploadFile = File(...)):
+async def transcribe(
+    request: Request,
+    file: UploadFile = File(...),
+    device: Optional[str] = Form(None)  # optional device flag ("mobile"/"desktop")
+):
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
@@ -139,27 +162,33 @@ async def transcribe(file: UploadFile = File(...)):
         try:
             data, sr = sf.read(src_path, dtype="float32", always_2d=False)
             dur = len(data) / float(sr)
-            wav_path = src_path
+            wav_path = src_path  # already WAV-like buffer
         except Exception as e2:
             logging.error(f"❌ Decode failed: {e2}")
             raise HTTPException(status_code=400, detail="Unsupported audio format.")
 
-    # --- Copy to uploads & archive ---
+    # --- Copy to uploads & archive (dataset expects /record_archive/wavs/...) ---
     now = datetime.datetime.now()
     timestamp = now.strftime("%m%d%Y_%H%M%S")
-    playback_filename = f"wv_{timestamp}.wav"
-    archive_filename = f"usr001_{timestamp}.wav"
-    playback_path = os.path.join(UPLOAD_DIR, playback_filename)
-    archive_path = os.path.join(ARCHIVE_DIR, archive_filename)
+    playback_filename = f"wv_{timestamp}.wav"          # for /uploads
+    archive_filename = f"usr001_{timestamp}.wav"       # dataset archive
+    playback_path_fs = os.path.join(UPLOAD_DIR, playback_filename)
+    archive_path_fs = os.path.join(ARCHIVE_WAV_DIR, archive_filename)
+
     try:
         with open(wav_path, "rb") as src:
             data = src.read()
-        with open(playback_path, "wb") as dst:
+        # save for immediate playback (frontend <audio src>)
+        with open(playback_path_fs, "wb") as dst:
             dst.write(data)
-        with open(archive_path, "wb") as dst:
+        # save for dataset archive (used by /record_archive/wavs/<file>)
+        with open(archive_path_fs, "wb") as dst:
             dst.write(data)
-        dlog(f"💾 Saved playback: {playback_path}")
-        dlog(f"💾 Saved archive: {archive_path}")
+
+        src_ua = request.headers.get("user-agent", "")
+        dlog(f"📱 Device flag: {device or 'unknown'} | UA: {src_ua[:80]}...")
+        dlog(f"💾 Saved playback: {playback_path_fs}")
+        dlog(f"💾 Saved archive:  {archive_path_fs}")
     except Exception as e:
         logging.warning(f"⚠️ Failed to save copies: {e}")
 
@@ -198,7 +227,7 @@ async def transcribe(file: UploadFile = File(...)):
             except Exception:
                 pass
 
-# --- Serve playback WAVs ---
+# --- Serve playback WAVs (kept for backward compatibility) ---
 @app.get("/uploads/{filename}")
 async def serve_upload(filename: str):
     path = os.path.join(UPLOAD_DIR, filename)
@@ -211,5 +240,10 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))
     logging.info(f"🚀 Starting server on port {port} (DIAG={'ON' if DIAG else 'OFF'})")
-    uvicorn.run("app:app", host="0.0.0.0", port=port,
-                log_level="info" if DIAG else "warning", access_log=DIAG)
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=port,
+        log_level="info" if DIAG else "warning",
+        access_log=DIAG
+    )
