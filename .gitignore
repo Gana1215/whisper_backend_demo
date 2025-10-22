@@ -1,0 +1,94 @@
+# =========================================
+# Mongolian Whisper API — Clean Git Config
+# =========================================
+
+# Ignore everything by default
+*
+
+# ✅ Keep these important files
+!app.py
+!requirements.txt
+!render.yaml
+!runtime.txt
+
+# ✅ Keep your Whisper model folder
+!models/
+!models/MN_Whisper_Small_CT2/**
+__pycache__/
+*.pyc
+*.env
+
+# =========================================
+# Mongolian Whisper API — Clean Git Config
+# Only keep app.py and requirements.txt
+# =========================================
+
+# Ignore everything by default
+*
+
+# But keep these core files
+!app.py
+!requirements.txt
+
+# --- Optional exceptions (only if you want to keep model config) ---
+!render.yaml
+!models/.gitkeep
+
+# --- Ignore macOS and system junk ---
+.DS_Store
+*/.DS_Store
+
+# --- Ignore your local dev / temp files ---
+app_Archive/
+app_1019.py
+commands.txt
+uploads/
+record_archive/
+__pycache__/
+*.log
+*.wav
+*.mp3
+*.zip
+*.tar
+# =========================================
+# Mongolian Whisper API — Clean Git Config
+# =========================================
+
+# Ignore everything by default
+*
+
+# ✅ Keep these important files
+!app.py
+!requirements.txt
+!render.yaml
+!runtime.txt
+
+# ✅ Keep your model folder (MN_Whisper_Small_CT2)
+!models/
+!models/MN_Whisper_Small_CT2/**
+!models/.gitkeep
+
+# --- Ignore macOS and system junk ---
+.DS_Store
+*/.DS_Store
+
+# --- Ignore local dev / temp files ---
+app_Archive/
+app_1019.py
+commands.txt
+uploads/
+record_archive/
+__pycache__/
+*.log
+*.wav
+*.mp3
+*.zip
+*.tar
+*.json
+
+# --- Allow model JSON and BIN files ---
+!models/MN_Whisper_Small_CT2/*.json
+!models/MN_Whisper_Small_CT2/*.txt
+!models/MN_Whisper_Small_CT2/*.bin
+
+
