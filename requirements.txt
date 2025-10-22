@@ -5,21 +5,19 @@
 
 # Core framework
 fastapi==0.115.0
-uvicorn==0.38.0
+uvicorn[standard]==0.38.0
 
 # Whisper backend (CTranslate2)
 faster-whisper==1.0.3
 
 # Audio & file handling
+pydub==0.25.1
 soundfile==0.12.1
 python-multipart==0.0.20
+numpy>=1.24.0
 
 # Schema / validation
 pydantic==2.9.2
 
-# Optional — install if using numpy explicitly or as dependency
-numpy>=1.24.0
-#Memory utils
+# Memory utils
 psutil==5.9.8
-
-pydub
