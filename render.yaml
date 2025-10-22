@@ -4,35 +4,12 @@ services:
     env: python
     plan: starter
     region: oregon
-
     buildCommand: |
-      echo "🚀 Starting build setup..."
-      apt-get update && apt-get install -y git-lfs ffmpeg
-
-      echo "🔧 Initializing Git LFS..."
       git lfs install
-
-      echo "🔍 Listing tracked LFS files before pull..."
-      git lfs ls-files || true
-
-      echo "📥 Pulling real LFS binaries..."
       git lfs pull
-
-      echo "📂 Listing model directory after pull:"
-      ls -lh models/MN_Whisper_Small_CT2 || true
-
-      echo "🧩 Checking for incomplete LFS files (<1 MB)..."
-      # Abort the build if any file is smaller than 1 MB (likely still a pointer)
-      find models/MN_Whisper_Small_CT2 -type f -size -1M -exec echo "❌ ERROR: Incomplete LFS file detected: {}" \; -exec false \; || true
-
-      echo "📦 Upgrading pip and installing requirements..."
       pip install --upgrade pip
       pip install -r requirements.txt
-
-      echo "✅ Build complete!"
-
-    startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
-
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: MODEL_DIR
         value: models/MN_Whisper_Small_CT2
@@ -40,5 +17,8 @@ services:
         value: cpu
       - key: COMPUTE_TYPE
         value: int8
-      - key: DIAG
-        value: "1"
+    aptPackages:
+      - ffmpeg
+      - git
+      - curl
+      - git-lfs
