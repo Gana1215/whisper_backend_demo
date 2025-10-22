@@ -7,7 +7,9 @@ services:
     buildCommand: |
       apt-get update && apt-get install -y ffmpeg
       pip install --upgrade pip
-      pip install --no-cache-dir ctranslate2==4.6.0 faster-whisper==1.2.0
+      # 👇 This line forces a fresh, source-built install of CT2 & Faster-Whisper
+      pip install --no-cache-dir --force-reinstall --no-binary=:all: ctranslate2==4.6.0 faster-whisper==1.2.0
+      # 👇 Then install the rest of your dependencies
       pip install --no-cache-dir -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
     envVars:
