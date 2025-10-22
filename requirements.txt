@@ -8,8 +8,12 @@ fastapi==0.115.0
 uvicorn==0.38.0
 
 # Whisper runtime (CTranslate2 backend)
-faster-whisper==1.2.0
-ctranslate2==4.6.0
+#faster-whisper==1.2.0
+#ctranslate2==4.6.0
+
+ctranslate2==4.6.0 --no-binary=:all:
+faster-whisper==1.2.0 --no-binary=:all:
+
 
 # Audio & file handling
 soundfile==0.12.1
