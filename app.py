@@ -35,7 +35,7 @@ DIAG = os.getenv("DIAG", "0") == "1"
 # --- Storage folders ---
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")                 # playback (mobile)
 ARCHIVE_DIR = os.path.join(BASE_DIR, "record_archive")         # permanent storage root
-ARCHIVE_WAV_DIR = os.path.join(ARCHIVE_DIR, "wavs")            # <-- dataset manager expects wavs here
+ARCHIVE_WAV_DIR = os.path.join(ARCHIVE_DIR, "wavs")            # dataset manager expects wavs here
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
@@ -66,17 +66,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---- Include CSV dataset routes (optional import safety) ----
+# ---- Include CSV dataset routes ----
 try:
-    from dataset_routes import router as dataset_router
-    app.include_router(dataset_router)
-    dlog("✅ dataset_routes mounted at /dataset/*")
-except Exception as _e:
-    logging.warning("⚠️ dataset_routes not available. /dataset/* endpoints disabled.")
+    import dataset_routes  # must be in same folder as app.py
+    app.include_router(dataset_routes.router)
+    print("✅ dataset_routes mounted at /dataset/*")
+except Exception as e:
+    logging.warning(f"⚠️ dataset_routes not available. /dataset/* endpoints disabled. {e}")
 
-# ---- Static mounts for audio playback (front-end uses these) ----
-# - /uploads/<filename>.wav         (transcribe results)
-# - /record_archive/wavs/<filename> (dataset audio)
+# ---- Static mounts for dataset playback ----
+# /record_archive/wavs/<file_name>
 app.mount("/record_archive", StaticFiles(directory=ARCHIVE_DIR), name="record_archive")
 
 # -------- Model --------
@@ -104,7 +103,14 @@ def load_model():
 # -------- Health --------
 @app.get("/")
 def health():
-    return {"ok": True, "msg": "Mongolian Whisper API is running."}
+    return {
+        "ok": True,
+        "msg": "Mongolian Whisper API is running.",
+        "model_loaded": model is not None,
+        "model_id": HF_MODEL,
+        "device": DEVICE,
+        "compute_type": COMPUTE_TYPE,
+    }
 
 # -------- Response schema --------
 class TranscribeResult(BaseModel):
