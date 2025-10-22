@@ -11,8 +11,10 @@ uvicorn==0.38.0
 #faster-whisper==1.2.0
 #ctranslate2==4.6.0
 
-ctranslate2==4.6.0 --no-binary=:all:
-faster-whisper==1.2.0 --no-binary=:all:
+#ctranslate2==4.6.0 --no-binary=:all:
+#faster-whisper==1.2.0 --no-binary=:all:
+ctranslate2==4.3.1
+faster-whisper==1.0.3
 
 
 # Audio & file handling
