@@ -6,6 +6,7 @@
 # ✅ Auto-saves uploads + permanent archive
 # ✅ Serves dataset audio from /record_archive/wavs/*
 # ✅ Includes CSV dataset routes (/dataset/*)
+# ✅ Locked usr001_ naming convention (2025-10-23)
 # ===============================================
 
 import os, tempfile, psutil, logging, time, datetime
@@ -33,9 +34,9 @@ MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))
 DIAG = os.getenv("DIAG", "0") == "1"
 
 # --- Storage folders ---
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")                 # playback (mobile)
-ARCHIVE_DIR = os.path.join(BASE_DIR, "record_archive")         # permanent storage root
-ARCHIVE_WAV_DIR = os.path.join(ARCHIVE_DIR, "wavs")            # dataset manager expects wavs here
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+ARCHIVE_DIR = os.path.join(BASE_DIR, "record_archive")
+ARCHIVE_WAV_DIR = os.path.join(ARCHIVE_DIR, "wavs")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
@@ -57,7 +58,7 @@ def log_memory(label=""):
         logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
 
 # -------- FastAPI setup --------
-app = FastAPI(title="Mongolian Whisper API", version="1.4")
+app = FastAPI(title="Mongolian Whisper API", version="1.5")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -68,14 +69,13 @@ app.add_middleware(
 
 # ---- Include CSV dataset routes ----
 try:
-    import dataset_routes  # must be in same folder as app.py
+    import dataset_routes
     app.include_router(dataset_routes.router)
     print("✅ dataset_routes mounted at /dataset/*")
 except Exception as e:
     logging.warning(f"⚠️ dataset_routes not available. /dataset/* endpoints disabled. {e}")
 
-# ---- Static mounts for dataset playback ----
-# /record_archive/wavs/<file_name>
+# ---- Static mounts ----
 app.mount("/record_archive", StaticFiles(directory=ARCHIVE_DIR), name="record_archive")
 
 # -------- Model --------
@@ -83,10 +83,8 @@ model: Optional[WhisperModel] = None
 
 @app.on_event("startup")
 def load_model():
-    """Load Whisper model from Hugging Face or local folder"""
     global model
     log_memory("Before loading model")
-
     try:
         dlog(f"🔄 Loading model from Hugging Face: {HF_MODEL}")
         model = WhisperModel(
@@ -96,7 +94,6 @@ def load_model():
     except Exception as e:
         logging.error(f"❌ Failed to load model from HF: {e}")
         raise RuntimeError(f"Failed to load model: {e}")
-
     log_memory("After loading model")
     dlog("✅ Model loaded successfully")
 
@@ -125,7 +122,7 @@ class TranscribeResult(BaseModel):
 async def transcribe(
     request: Request,
     file: UploadFile = File(...),
-    device: Optional[str] = Form(None)  # optional device flag ("mobile"/"desktop")
+    device: Optional[str] = Form(None)
 ):
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
@@ -138,7 +135,7 @@ async def transcribe(
         raise HTTPException(status_code=415, detail=f"Unsupported type: {ct}")
     cl = getattr(file, "size", None)
     if cl and cl > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail=f"File too large.")
+        raise HTTPException(status_code=413, detail="File too large.")
 
     # --- Save upload to temp file ---
     try:
@@ -168,33 +165,36 @@ async def transcribe(
         try:
             data, sr = sf.read(src_path, dtype="float32", always_2d=False)
             dur = len(data) / float(sr)
-            wav_path = src_path  # already WAV-like buffer
+            wav_path = src_path
         except Exception as e2:
             logging.error(f"❌ Decode failed: {e2}")
             raise HTTPException(status_code=400, detail="Unsupported audio format.")
 
-    # --- Copy to uploads & archive (dataset expects /record_archive/wavs/...) ---
+    # --- Copy to uploads & archive ---
     now = datetime.datetime.now()
     timestamp = now.strftime("%m%d%Y_%H%M%S")
-    playback_filename = f"wv_{timestamp}.wav"          # for /uploads
-    archive_filename = f"usr001_{timestamp}.wav"       # dataset archive
+
+    # 🧩 Locked naming convention (2025-10-23)
+    # usr_YYYY.wav → temporary blob (auto-deleted)
+    # usr001_YYYY.wav → permanent dataset WAV
+    playback_filename = f"usr_{timestamp}.wav"
+    archive_filename  = f"usr001_{timestamp}.wav"
+
     playback_path_fs = os.path.join(UPLOAD_DIR, playback_filename)
-    archive_path_fs = os.path.join(ARCHIVE_WAV_DIR, archive_filename)
+    archive_path_fs  = os.path.join(ARCHIVE_WAV_DIR, archive_filename)
 
     try:
         with open(wav_path, "rb") as src:
             data = src.read()
-        # save for immediate playback (frontend <audio src>)
         with open(playback_path_fs, "wb") as dst:
             dst.write(data)
-        # save for dataset archive (used by /record_archive/wavs/<file>)
         with open(archive_path_fs, "wb") as dst:
             dst.write(data)
 
         src_ua = request.headers.get("user-agent", "")
         dlog(f"📱 Device flag: {device or 'unknown'} | UA: {src_ua[:80]}...")
-        dlog(f"💾 Saved playback: {playback_path_fs}")
-        dlog(f"💾 Saved archive:  {archive_path_fs}")
+        dlog(f"💾 Blob saved: {playback_path_fs}")
+        dlog(f"💾 Archive saved: {archive_path_fs}")
     except Exception as e:
         logging.warning(f"⚠️ Failed to save copies: {e}")
 
@@ -233,7 +233,7 @@ async def transcribe(
             except Exception:
                 pass
 
-# --- Serve playback WAVs (kept for backward compatibility) ---
+# --- Serve playback WAVs (legacy) ---
 @app.get("/uploads/{filename}")
 async def serve_upload(filename: str):
     path = os.path.join(UPLOAD_DIR, filename)

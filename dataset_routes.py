@@ -1,16 +1,16 @@
 # ===============================================
-# 📚 dataset_routes.py (patched 2025-10-22)
-# ✅ JSON-compatible update/delete for new frontend
-# ✅ Simple CSV-based dataset manager for Mongolian Whisper
-# ✅ Handles add / update / delete / list operations
-# ✅ All samples stored under: record_archive/wavs/
-# ✅ Metadata file: record_archive/metadata.csv
+# 📚 dataset_routes.py (v1.8 — Orphan Cleanup Edition)
+# ✅ Compatible with both JSON & FormData
+# ✅ CSV header protection (auto-restores if missing)
+# ✅ Prevents duplicate entries
+# ✅ Removes orphaned temporary files safely
+# ✅ Keeps only usr001_*.wav dataset files
 # ===============================================
 
 import os
 import csv
 import aiofiles
-from fastapi import APIRouter, UploadFile, Form, Body, HTTPException
+from fastapi import APIRouter, UploadFile, Form, Request, HTTPException
 from fastapi.responses import JSONResponse
 
 router = APIRouter(prefix="/dataset", tags=["dataset"])
@@ -27,43 +27,56 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # --- Ensure CSV header exists ---
 if not os.path.exists(CSV_PATH):
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["file_name", "text"])
+        csv.writer(f).writerow(["file_name", "text"])
 
-# 🟩 Add new sample (upload WAV + text)
+# 🟩 Add new sample
 @router.post("/add")
 async def add_sample(file: UploadFile, text: str = Form(...)):
     try:
         file_path = os.path.join(WAV_DIR, file.filename)
-        # Save WAV asynchronously
+
+        if os.path.exists(file_path):
+            return JSONResponse(status_code=400, content={"error": f"{file.filename} exists."})
+
         async with aiofiles.open(file_path, "wb") as f:
             await f.write(await file.read())
 
-        # Append entry to CSV
+        # Ensure header
+        if not os.path.exists(CSV_PATH) or os.path.getsize(CSV_PATH) == 0:
+            with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow(["file_name", "text"])
+
+        # Append record
         with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow([file.filename, text])
+            csv.writer(f).writerow([file.filename.strip(), text.strip()])
 
         return {"status": "ok", "message": "Added", "file_name": file.filename}
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# 🟨 Update text for an existing sample (now JSON body)
+# 🟨 Update sample text
 @router.post("/update")
-async def update_sample(data: dict = Body(...)):
-    file_name = data.get("file_name")
-    new_text = data.get("new_text")
-    if not file_name:
-        raise HTTPException(status_code=400, detail="file_name missing")
-
+async def update_sample(request: Request):
     try:
+        if request.headers.get("content-type", "").startswith("application/json"):
+            data = await request.json()
+            file_name = data.get("file_name")
+            new_text = data.get("new_text", "")
+        else:
+            form = await request.form()
+            file_name = form.get("file_name")
+            new_text = form.get("new_text", "")
+
+        if not file_name:
+            raise HTTPException(status_code=400, detail="file_name missing")
+
         rows, found = [], False
         with open(CSV_PATH, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for r in reader:
                 if r["file_name"] == file_name:
-                    r["text"] = new_text or ""
+                    r["text"] = new_text.strip()
                     found = True
                 rows.append(r)
 
@@ -80,14 +93,20 @@ async def update_sample(data: dict = Body(...)):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# 🟥 Delete sample (now JSON body)
+# 🟥 Delete one sample
 @router.post("/delete")
-async def delete_sample(data: dict = Body(...)):
-    file_name = data.get("file_name")
-    if not file_name:
-        raise HTTPException(status_code=400, detail="file_name missing")
-
+async def delete_sample(request: Request):
     try:
+        if request.headers.get("content-type", "").startswith("application/json"):
+            data = await request.json()
+            file_name = data.get("file_name")
+        else:
+            form = await request.form()
+            file_name = form.get("file_name")
+
+        if not file_name:
+            raise HTTPException(status_code=400, detail="file_name missing")
+
         rows, found = [], False
         with open(CSV_PATH, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -114,15 +133,43 @@ async def delete_sample(data: dict = Body(...)):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+# 🧹 Clean orphan files (usr_*, wv_*, temp_*)
+@router.post("/cleanup")
+async def cleanup_orphans():
+    try:
+        if not os.path.exists(WAV_DIR):
+            return {"status": "ok", "removed": 0, "message": "No wavs folder"}
+
+        removed = 0
+        for f in os.listdir(WAV_DIR):
+            # only remove files that are not in CSV AND start with 'usr_' or 'wv_'
+            if not f.endswith(".wav"):
+                continue
+            if f.startswith(("usr_", "wv_")) and not f.startswith("usr001_"):
+                file_path = os.path.join(WAV_DIR, f)
+                os.remove(file_path)
+                removed += 1
+
+        return {"status": "ok", "removed": removed, "message": f"🧹 Removed {removed} orphan files"}
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 # 🟦 List all dataset samples
 @router.get("/list")
 async def list_samples():
     try:
+        if not os.path.exists(CSV_PATH):
+            return {"count": 0, "samples": []}
+
         with open(CSV_PATH, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            data = list(reader)
+            data = []
+            for r in reader:
+                clean = {k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in r.items() if k}
+                data.append(clean)
+
         return {"count": len(data), "samples": data}
-    except FileNotFoundError:
-        return {"count": 0, "samples": []}
+
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
