@@ -1,8 +1,9 @@
 # ===============================================
-# 📚 dataset_routes.py (v2.5 — Persistent Auto-Logging Edition)
+# 📚 dataset_routes.py (v2.6 — Persistent Auto-Logging Edition)
 # ✅ Unified with app.py for persistent dataset logging
 # ✅ Adds append_metadata() helper for auto CSV logging from /transcribe
 # ✅ Prevents duplicates, initializes metadata.csv with header
+# ✅ Handles empty transcriptions (logs as "EMPTY_AUDIO")
 # ✅ Compatible with Render persistent disk (/local_persistent/record_archive)
 # ===============================================
 
@@ -46,23 +47,27 @@ if not os.path.exists(CSV_PATH):
 def append_metadata(file_name: str, text: str):
     """Safely append a new entry to metadata.csv if not already present."""
     try:
-        # ensure header
+        # ensure header exists
         if not os.path.exists(CSV_PATH) or os.path.getsize(CSV_PATH) == 0:
             with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(["file_name", "text"])
 
-        # prevent duplicates
+        # load existing entries
         existing = set()
         with open(CSV_PATH, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for r in reader:
                 existing.add(r["file_name"])
 
+        # normalize and clean text
         rel_path = f"wavs/{os.path.basename(file_name)}"
+        clean_text = text.strip() if text and text.strip() else "EMPTY_AUDIO"
+
+        # append new entry if not duplicate
         if rel_path not in existing:
             with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow([rel_path, text.strip() or ""])
-            print(f"🧾 Added to metadata.csv → {rel_path}")
+                csv.writer(f).writerow([rel_path, clean_text])
+            print(f"🧾 Added to metadata.csv → {rel_path} | text='{clean_text}'")
         else:
             print(f"⚠️ Duplicate skipped: {rel_path}")
 
@@ -113,7 +118,7 @@ async def update_sample(request: Request):
             reader = csv.DictReader(f)
             for r in reader:
                 if r["file_name"] == file_name:
-                    r["text"] = new_text.strip()
+                    r["text"] = new_text.strip() if new_text.strip() else "EMPTY_AUDIO"
                     found = True
                 rows.append(r)
 
