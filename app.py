@@ -1,12 +1,12 @@
 # ===============================================
 # 🎙️ Mongolian Whisper API (FastAPI + Faster-Whisper)
 # ✅ Unified storage — /record_archive/wavs only (no /uploads)
-# ✅ Robust decoding (pydub + fallback + Safari fix)
+# ✅ Robust decoding (pydub + fallback + Safari/iOS fix)
 # ✅ Works on local & Render environments
 # ✅ Handles mobile uploads (iOS/Android)
-# ✅ Creates permanent WAVs (usr001_*.wav) for playback
+# ✅ Creates universal 44.1kHz 16-bit PCM WAVs (Safari-safe)
 # ✅ /transcribe = inference only (NO CSV writes)
-# ✅ Persistent storage support via DATA_DIR (Render/local_persistent)
+# ✅ Persistent storage via DATA_DIR or local fallback
 # ===============================================
 
 import os, tempfile, psutil, logging, time, datetime, io
@@ -20,7 +20,6 @@ from pydub import AudioSegment
 import soundfile as sf
 from dataset_routes import append_metadata
 
-
 # -------- Environment detection --------
 IS_RENDER = os.path.exists("/opt/render")
 BASE_DIR = "/opt/render/project/src" if IS_RENDER else os.getcwd()
@@ -30,7 +29,7 @@ os.chdir(BASE_DIR)
 HF_MODEL = os.getenv("HF_MODEL", "gana1215/MN_Whisper_Small_CT2")
 DEVICE = os.getenv("DEVICE", "cpu")
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))  # 10 MB
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))
 MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))
 DIAG = os.getenv("DIAG", "0") == "1"
 
@@ -61,7 +60,7 @@ def log_memory(label=""):
         logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
 
 # -------- FastAPI setup --------
-app = FastAPI(title="Mongolian Whisper API", version="1.9.3")
+app = FastAPI(title="Mongolian Whisper API", version="1.9.4")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -159,10 +158,9 @@ async def transcribe(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to save temp file: {e}")
 
-    # --- Decode with pydub to WAV (Safari AAC/mp4 fix) ---
+    # --- Decode with pydub (with AAC/mp4 fix) ---
     dur = None
     try:
-        # ✅ Force correct format for iOS Safari uploads (AAC/mp4)
         fmt = None
         if "mp4" in ct or "aac" in ct or (file.filename and file.filename.endswith(".mp4")):
             fmt = "mp4"
@@ -184,19 +182,23 @@ async def transcribe(
             logging.error(f"❌ Fallback decode failed: {e2}")
             raise HTTPException(status_code=400, detail="Unsupported audio format.")
 
-    # --- Create permanent WAV (usr001_*.wav) ---
+    # --- Re-encode to Safari-safe PCM WAV (mono, 44.1kHz, 16-bit) ---
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     final_name = f"usr001_{timestamp}.wav"
     final_path = os.path.join(ARCHIVE_WAV_DIR, final_name)
-
     try:
-        # ✅ Always re-encode to true PCM_S16LE WAV
-        audio.export(final_path, format="wav", parameters=["-acodec", "pcm_s16le"])
+        audio = audio.set_frame_rate(44100).set_channels(1)
+        audio.export(
+            final_path,
+            format="wav",
+            parameters=["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1"]
+        )
         dlog(f"💾 Saved final WAV: {final_path}")
+        dlog(f"🎚 Format: {audio.frame_rate}Hz, {audio.channels}ch, {audio.sample_width*8}-bit")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to export WAV: {e}")
 
-    # --- Run inference ---
+    # --- Inference ---
     try:
         t0 = time.perf_counter()
         segments, info = model.transcribe(
@@ -212,7 +214,7 @@ async def transcribe(
         elapsed_ms = (time.perf_counter() - t0) * 1000
         text = "".join(seg.text for seg in segments).strip()
         log_memory("After transcription")
-        dlog(f"✅ Inference done ({elapsed_ms:.1f} ms, text len {len(text)})")
+        dlog(f"✅ Inference done ({elapsed_ms:.1f} ms, len={len(text)})")
 
         return TranscribeResult(
             user_text=text,
@@ -227,12 +229,12 @@ async def transcribe(
         raise HTTPException(status_code=500, detail=f"Inference error: {e}")
 
     finally:
-        try:
-            if os.path.exists(src_path):
+        if os.path.exists(src_path):
+            try:
                 os.remove(src_path)
                 dlog(f"🧹 Temp removed: {src_path}")
-        except Exception:
-            pass
+            except Exception:
+                pass
 
 # -------- Entrypoint --------
 if __name__ == "__main__":
