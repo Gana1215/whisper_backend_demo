@@ -1,9 +1,10 @@
 # ===============================================
-# 📚 dataset_routes.py (v2.6 — Persistent Auto-Logging Edition)
+# 📚 dataset_routes.py (v2.7 — Persistent Export Edition)
 # ✅ Unified with app.py for persistent dataset logging
 # ✅ Adds append_metadata() helper for auto CSV logging from /transcribe
 # ✅ Prevents duplicates, initializes metadata.csv with header
 # ✅ Handles empty transcriptions (logs as "EMPTY_AUDIO")
+# ✅ Adds /dataset/export to download the full dataset (ZIP)
 # ✅ Compatible with Render persistent disk (/local_persistent/record_archive)
 # ===============================================
 
@@ -11,7 +12,8 @@ import os
 import csv
 import aiofiles
 from fastapi import APIRouter, UploadFile, Form, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+import shutil, tempfile
 
 router = APIRouter(prefix="/dataset", tags=["dataset"])
 
@@ -224,4 +226,40 @@ async def list_samples():
         return {"count": len(data), "samples": data}
 
     except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# =====================================================
+# 🟦 Export dataset as ZIP (New)
+# =====================================================
+@router.get("/export")
+async def export_dataset():
+    """Create and return a ZIP of the dataset (WAVs + metadata.csv)."""
+    try:
+        # Check if there’s anything to export
+        if not os.path.exists(CSV_PATH) or os.stat(CSV_PATH).st_size == 0:
+            return JSONResponse(status_code=400, content={"error": "No dataset entries yet."})
+
+        # Create temp zip path
+        tmp_dir = tempfile.gettempdir()
+        zip_base = os.path.join(tmp_dir, "dataset_export")
+        zip_path = f"{zip_base}.zip"
+
+        # Remove old temp zip if exists
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+
+        # Create ZIP from ARCHIVE_DIR (includes WAVs + metadata.csv)
+        shutil.make_archive(zip_base, "zip", ARCHIVE_DIR)
+
+        print(f"📦 Dataset exported → {zip_path}")
+
+        return FileResponse(
+            zip_path,
+            filename="dataset_export.zip",
+            media_type="application/zip"
+        )
+
+    except Exception as e:
+        print(f"❌ Export failed: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
