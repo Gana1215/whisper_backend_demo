@@ -1,3 +1,8 @@
+# ===============================================
+# 🎙️ Mongolian Whisper Backend — Render Config
+# Version: v1.9 (Persistent Dataset Edition)
+# ===============================================
+
 services:
   - type: web
     name: mongolian-whisper-api
@@ -6,12 +11,14 @@ services:
     region: oregon
 
     buildCommand: |
+      apt-get update && apt-get install -y ffmpeg
       pip install --upgrade pip
       pip install -r requirements.txt
 
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
 
     envVars:
+      # 🔧 Model + runtime config
       - key: HF_MODEL
         value: gana1215/MN_Whisper_Small_CT2
       - key: DEVICE
@@ -20,3 +27,17 @@ services:
         value: int8
       - key: DIAG
         value: "1"
+
+      # 🧱 Persistent data path (used by app.py)
+      - key: DATA_DIR
+        value: /data/record_archive
+
+    # 💾 Persistent disk (1 GB, can increase later)
+    disk:
+      name: whisper_dataset_storage
+      mountPath: /data
+      sizeGB: 1
+
+    # 🩺 Health check — ensures API is responsive
+    healthCheckPath: /
+    healthCheckTimeout: 120

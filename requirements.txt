@@ -1,33 +1,28 @@
 # =============================
-# Mongolian Whisper API (Local + Render)
+# 🎙️ Mongolian Whisper API (Local + Render)
 # FastAPI + Faster-Whisper backend
 # =============================
 
-# Core framework
+# --- Core Framework ---
 fastapi==0.115.0
 uvicorn==0.38.0
+python-multipart==0.0.20
+aiofiles==24.1.0
 
-# Whisper runtime (CTranslate2 backend)
+# --- Whisper Runtime (CTranslate2 backend) ---
 faster-whisper==1.2.0
 ctranslate2==4.6.0
+# (Optional offline build)
+# ctranslate2==4.6.0 --no-binary=:all:
+# faster-whisper==1.2.0 --no-binary=:all:
 
-#ctranslate2==4.6.0 --no-binary=:all:
-#faster-whisper==1.2.0 --no-binary=:all:
-#ctranslate2==4.3.1
-#faster-whisper==1.0.3
-
-
-# Audio & file handling
+# --- Audio & File Handling ---
 soundfile==0.12.1
 pydub==0.25.1
-python-multipart==0.0.20
-aiofiles
-
-# Schema / validation
-pydantic==2.9.2
-
-# Optional — install if using numpy explicitly or as dependency
 numpy>=1.24.0
 
-# Memory utils
+# --- Schema & Validation ---
+pydantic==2.9.2
+
+# --- Memory & Diagnostics ---
 psutil==5.9.8
