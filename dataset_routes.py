@@ -1,11 +1,9 @@
 # ===============================================
-# 📚 dataset_routes.py (v2.4 — Persistent Unified Edition)
-# ✅ Always shares dataset folder with app.py
-# ✅ Prefers local_persistent/record_archive if it exists
-# ✅ Honors DATA_DIR (Render/local override)
-# ✅ Auto-creates metadata.csv with header
-# ✅ Prevents duplicates, cleans orphans
-# ✅ Compatible with FormData & JSON
+# 📚 dataset_routes.py (v2.5 — Persistent Auto-Logging Edition)
+# ✅ Unified with app.py for persistent dataset logging
+# ✅ Adds append_metadata() helper for auto CSV logging from /transcribe
+# ✅ Prevents duplicates, initializes metadata.csv with header
+# ✅ Compatible with Render persistent disk (/local_persistent/record_archive)
 # ===============================================
 
 import os
@@ -19,20 +17,15 @@ router = APIRouter(prefix="/dataset", tags=["dataset"])
 # =====================================================
 # 🌐 Resolve shared persistent dataset directory
 # =====================================================
-# app.py does: IS_RENDER = os.path.exists("/opt/render"), BASE_DIR=...; os.chdir(BASE_DIR)
-# At this import time, cwd should already be BASE_DIR.
 BASE_DIR = os.getcwd()
-
 LOCAL_PERSISTENT = os.path.join(BASE_DIR, "local_persistent", "record_archive")
 ENV_DATA_DIR = os.getenv("DATA_DIR")
 
 if ENV_DATA_DIR:
     ARCHIVE_DIR = ENV_DATA_DIR
 elif os.path.isdir(LOCAL_PERSISTENT):
-    # Prefer local_persistent if present (local dev)
     ARCHIVE_DIR = LOCAL_PERSISTENT
 else:
-    # Fallback to project-relative record_archive
     ARCHIVE_DIR = os.path.join(BASE_DIR, "record_archive")
 
 print(f"📦 dataset_routes using → {ARCHIVE_DIR}")
@@ -46,35 +39,59 @@ if not os.path.exists(CSV_PATH):
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(["file_name", "text"])
 
-# 🟩 Add new sample -------------------------------------------------
+
+# =====================================================
+# ✳️ Helper: append metadata entry (called by app.py)
+# =====================================================
+def append_metadata(file_name: str, text: str):
+    """Safely append a new entry to metadata.csv if not already present."""
+    try:
+        # ensure header
+        if not os.path.exists(CSV_PATH) or os.path.getsize(CSV_PATH) == 0:
+            with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow(["file_name", "text"])
+
+        # prevent duplicates
+        existing = set()
+        with open(CSV_PATH, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                existing.add(r["file_name"])
+
+        rel_path = f"wavs/{os.path.basename(file_name)}"
+        if rel_path not in existing:
+            with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow([rel_path, text.strip() or ""])
+            print(f"🧾 Added to metadata.csv → {rel_path}")
+        else:
+            print(f"⚠️ Duplicate skipped: {rel_path}")
+
+    except Exception as e:
+        print(f"❌ Failed to append metadata: {e}")
+
+
+# =====================================================
+# Existing dataset management routes
+# =====================================================
+
 @router.post("/add")
 async def add_sample(file: UploadFile, text: str = Form(...)):
     """Add a new manually uploaded sample to the dataset"""
     try:
         file_path = os.path.join(WAV_DIR, file.filename)
-
-        # prevent overwriting
         if os.path.exists(file_path):
             return JSONResponse(status_code=400, content={"error": f"{file.filename} already exists."})
 
         async with aiofiles.open(file_path, "wb") as f:
             await f.write(await file.read())
 
-        # ensure header
-        if not os.path.exists(CSV_PATH) or os.path.getsize(CSV_PATH) == 0:
-            with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(["file_name", "text"])
-
-        # append record (relative path for portability)
-        with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow([f"wavs/{file.filename.strip()}", text.strip()])
-
+        append_metadata(file.filename, text)
         return {"status": "ok", "message": "Added", "file_name": file.filename}
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# 🟨 Update existing sample -----------------------------------------
+
 @router.post("/update")
 async def update_sample(request: Request):
     """Update the text for a given WAV file"""
@@ -113,7 +130,7 @@ async def update_sample(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# 🟥 Delete sample --------------------------------------------------
+
 @router.post("/delete")
 async def delete_sample(request: Request):
     """Delete a dataset entry and its corresponding WAV file"""
@@ -154,7 +171,7 @@ async def delete_sample(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# 🧹 Clean orphaned files -------------------------------------------
+
 @router.post("/cleanup")
 async def cleanup_orphans():
     """Remove orphaned temporary or unlisted recordings"""
@@ -165,7 +182,6 @@ async def cleanup_orphans():
         removed = 0
         valid_files = set()
 
-        # load filenames from CSV
         if os.path.exists(CSV_PATH):
             with open(CSV_PATH, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
@@ -175,9 +191,7 @@ async def cleanup_orphans():
         for f in os.listdir(WAV_DIR):
             if not f.endswith(".wav"):
                 continue
-            # remove unlisted or temporary recordings
-            if (f.startswith(("usr_", "wv_", "temp_")) and not f.startswith("usr001_")) \
-               or f not in valid_files:
+            if (f.startswith(("usr_", "wv_", "temp_")) and not f.startswith("usr001_")) or f not in valid_files:
                 os.remove(os.path.join(WAV_DIR, f))
                 removed += 1
 
@@ -186,7 +200,7 @@ async def cleanup_orphans():
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# 🟦 List samples ----------------------------------------------------
+
 @router.get("/list")
 async def list_samples():
     """List all samples from metadata.csv"""

@@ -18,6 +18,8 @@ from pydantic import BaseModel
 from faster_whisper import WhisperModel
 from pydub import AudioSegment
 import soundfile as sf
+from dataset_routes import append_metadata
+
 
 # -------- Environment detection --------
 IS_RENDER = os.path.exists("/opt/render")
