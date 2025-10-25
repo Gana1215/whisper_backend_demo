@@ -4,10 +4,8 @@
 # ✅ Robust decoding (pydub + fallback + Safari/iOS fix)
 # ✅ Works on local & Render environments
 # ✅ Handles mobile uploads (iOS/Android)
-# ✅ Re-encodes to universal PCM WAV: mono, 44.1kHz, 16-bit
-# ✅ Persistent storage via DATA_DIR or local fallback
-# ✅ Environment loaded from .env (python-dotenv)
-# ✅ /dataset/* routes auto-mounted when available
+# ✅ Inference-only (no permanent WAV writes)
+# ✅ Persistent storage handled separately by /dataset/add
 # ===============================================
 
 import os, tempfile, psutil, logging, time, datetime, io, sys
@@ -30,7 +28,6 @@ required_env = ["HF_MODEL", "DEVICE", "COMPUTE_TYPE", "DATA_DIR"]
 missing = [k for k in required_env if not os.getenv(k)]
 if missing:
     print(f"❌ Missing required environment variables: {missing}")
-    # only exit locally — Render provides env separately
     if not os.path.exists("/opt/render"):
         sys.exit(1)
 
@@ -53,16 +50,9 @@ print(f"   HF_MODEL        → {HF_MODEL}")
 print(f"   DEVICE          → {DEVICE}")
 print(f"   COMPUTE_TYPE    → {COMPUTE_TYPE}")
 print(f"   DATA_DIR        → {DATA_DIR}")
-print(f"   MAX_UPLOAD_BYTES→ {MAX_UPLOAD_BYTES}")
-print(f"   MAX_DURATION_SEC→ {MAX_DURATION_SEC}")
-print(f"   DIAG            → {DIAG}")
 
 # --- Storage folders ---
-if DATA_DIR and os.path.exists(DATA_DIR):
-    ARCHIVE_DIR = DATA_DIR
-else:
-    ARCHIVE_DIR = os.path.join(BASE_DIR, "local_persistent/record_archive")
-
+ARCHIVE_DIR = DATA_DIR if os.path.exists(DATA_DIR) else os.path.join(BASE_DIR, "local_persistent/record_archive")
 ARCHIVE_WAV_DIR = os.path.join(ARCHIVE_DIR, "wavs")
 os.makedirs(ARCHIVE_WAV_DIR, exist_ok=True)
 print(f"📦 Dataset directory in use → {ARCHIVE_DIR}")
@@ -83,7 +73,7 @@ def log_memory(label=""):
         logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
 
 # -------- FastAPI setup --------
-app = FastAPI(title="Mongolian Whisper API", version="1.9.7")
+app = FastAPI(title="Mongolian Whisper API", version="1.9.8")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -164,7 +154,7 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File too large.")
 
-    # --- Save to temp ---
+    # --- Save upload to temp file ---
     suffix = os.path.splitext(file.filename or "")[-1] or ".wav"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(contents)
@@ -202,23 +192,17 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
             logging.error(f"❌ Fallback decode failed: {e2}")
             raise HTTPException(status_code=400, detail=f"Unsupported audio format ({e2})")
 
-    # --- Export to WAV ---
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    final_name = f"usr001_{timestamp}.wav"
-    final_path = os.path.join(ARCHIVE_WAV_DIR, final_name)
-
-    audio.export(
-        final_path,
-        format="wav",
-        parameters=["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1"],
-    )
-    dlog(f"💾 Saved final WAV: {final_path}")
+    # --- Create temp WAV for inference ---
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
+        audio.export(tmp_wav.name, format="wav")
+        tmp_wav_path = tmp_wav.name
+    dlog(f"🧩 Created temp WAV for inference → {tmp_wav_path}")
 
     # --- Inference ---
     try:
         t0 = time.perf_counter()
         segments, info = model.transcribe(
-            final_path,
+            tmp_wav_path,
             language="mn",
             task="transcribe",
             vad_filter=True,
@@ -237,22 +221,17 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
             language=getattr(info, "language", "mn"),
             duration_sec=dur,
             time_ms=elapsed_ms,
-            playback_path=f"/record_archive/wavs/{final_name}",
+            playback_path=None  # playback uses blob, not file
         )
     finally:
-        if os.path.exists(src_path):
-            os.remove(src_path)
-            dlog(f"🧹 Temp removed: {src_path}")
+        for p in [src_path, tmp_wav_path]:
+            if os.path.exists(p):
+                os.remove(p)
+                dlog(f"🧹 Temp removed: {p}")
 
 # -------- Entrypoint --------
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))
     logging.info(f"🚀 Starting server on port {port} (DIAG={'ON' if DIAG else 'OFF'})")
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=port,
-        log_level="info" if DIAG else "warning",
-        access_log=DIAG,
-    )
+    uvicorn.run("app:app", host="0.0.0.0", port=port, log_level="info" if DIAG else "warning")
