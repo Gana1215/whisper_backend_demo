@@ -4,7 +4,7 @@
 # ✅ Robust decoding (pydub + fallback + Safari/iOS fix)
 # ✅ Works on local & Render environments
 # ✅ Handles mobile uploads (iOS/Android)
-# ✅ Creates universal 44.1kHz 16-bit PCM WAVs (Safari-safe)
+# ✅ Re-encodes to universal PCM WAV: mono, 44.1kHz, 16-bit
 # ✅ /transcribe = inference only (NO CSV writes)
 # ✅ Persistent storage via DATA_DIR or local fallback
 # ===============================================
@@ -18,7 +18,6 @@ from pydantic import BaseModel
 from faster_whisper import WhisperModel
 from pydub import AudioSegment
 import soundfile as sf
-from dataset_routes import append_metadata
 
 # -------- Environment detection --------
 IS_RENDER = os.path.exists("/opt/render")
@@ -29,7 +28,7 @@ os.chdir(BASE_DIR)
 HF_MODEL = os.getenv("HF_MODEL", "gana1215/MN_Whisper_Small_CT2")
 DEVICE = os.getenv("DEVICE", "cpu")
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))  # 10 MB
 MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))
 DIAG = os.getenv("DIAG", "0") == "1"
 
@@ -60,7 +59,7 @@ def log_memory(label=""):
         logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
 
 # -------- FastAPI setup --------
-app = FastAPI(title="Mongolian Whisper API", version="1.9.4")
+app = FastAPI(title="Mongolian Whisper API", version="1.9.5")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -69,15 +68,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---- Include CSV dataset routes ----
-try:
-    import dataset_routes
-    app.include_router(dataset_routes.router)
-    print("✅ dataset_routes mounted at /dataset/*")
-except Exception as e:
-    logging.warning(f"⚠️ dataset_routes not available. /dataset/* endpoints disabled. {e}")
-
-# ---- Static mounts ----
+# ---- Static mount for dataset playback ----
 app.mount("/record_archive", StaticFiles(directory=ARCHIVE_DIR), name="record_archive")
 
 # -------- Model --------
@@ -124,7 +115,7 @@ class TranscribeResult(BaseModel):
     time_ms: Optional[float] = None
     playback_path: Optional[str] = None
 
-# -------- Main endpoint --------
+# -------- Main endpoint (inference only; WAV persisted for playback) --------
 @app.post("/transcribe", response_model=TranscribeResult)
 async def transcribe(
     request: Request,
@@ -158,36 +149,53 @@ async def transcribe(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to save temp file: {e}")
 
-    # --- Decode with pydub (with AAC/mp4 fix) ---
+    # --- Decode (format hint for iOS/webm) ---
     dur = None
     try:
         fmt = None
-        if "mp4" in ct or "aac" in ct or (file.filename and file.filename.endswith(".mp4")):
+        # Explicit hints improve reliability across browsers
+        if "mp4" in ct or "aac" in ct or (file.filename and file.filename.lower().endswith(".mp4")):
             fmt = "mp4"
+        elif "webm" in ct or (file.filename and file.filename.lower().endswith(".webm")):
+            fmt = "webm"
+        elif "ogg" in ct or (file.filename and file.filename.lower().endswith(".ogg")):
+            fmt = "ogg"
+
         audio = AudioSegment.from_file(src_path, format=fmt)
+
+        # ✅ Normalize to TRUE PCM WAV: 44.1kHz, mono, 16-bit (Safari-safe)
+        audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
         dur = len(audio) / 1000.0
         if dur > MAX_DURATION_SEC:
             raise HTTPException(status_code=413, detail=f"Audio too long ({dur:.1f}s).")
-        dlog(f"🎧 Decoded {ct} (format={fmt or 'auto'}) → {dur:.2f}s")
+        dlog(f"🎧 Decoded {ct} (fmt={fmt or 'auto'}) → {dur:.2f}s")
     except HTTPException:
         raise
     except Exception as e:
         logging.warning(f"⚠️ pydub decode failed ({e}); trying fallback...")
         try:
             data, sr = sf.read(src_path, dtype="float32", always_2d=False)
-            dur = len(data) / float(sr)
-            audio = AudioSegment.from_file(io.BytesIO(data.tobytes()), format="wav")
+            # Build a WAV segment from raw samples, then normalize
+            raw_wav = AudioSegment(
+                (data.tobytes()),
+                frame_rate=sr,
+                sample_width=4,  # float32 bytes
+                channels=1 if (len(getattr(data, 'shape', [])) == 1) else data.shape[1],
+            )
+            audio = raw_wav.set_frame_rate(44100).set_channels(1).set_sample_width(2)
+            dur = len(audio) / 1000.0
             dlog(f"🎧 Fallback decode OK → {dur:.2f}s")
         except Exception as e2:
             logging.error(f"❌ Fallback decode failed: {e2}")
             raise HTTPException(status_code=400, detail="Unsupported audio format.")
 
-    # --- Re-encode to Safari-safe PCM WAV (mono, 44.1kHz, 16-bit) ---
+    # --- Create permanent WAV (usr001_*.wav) ---
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     final_name = f"usr001_{timestamp}.wav"
     final_path = os.path.join(ARCHIVE_WAV_DIR, final_name)
+
     try:
-        audio = audio.set_frame_rate(44100).set_channels(1)
+        # Force encoder: PCM signed 16-bit little endian, 44.1kHz mono
         audio.export(
             final_path,
             format="wav",
@@ -223,11 +231,9 @@ async def transcribe(
             time_ms=elapsed_ms,
             playback_path=f"/record_archive/wavs/{final_name}",
         )
-
     except Exception as e:
         logging.error(f"❌ Inference error: {e}")
         raise HTTPException(status_code=500, detail=f"Inference error: {e}")
-
     finally:
         if os.path.exists(src_path):
             try:
