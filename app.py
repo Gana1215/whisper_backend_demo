@@ -7,10 +7,12 @@
 # ✅ Re-encodes to universal PCM WAV: mono, 44.1kHz, 16-bit
 # ✅ /transcribe = inference only (NO CSV writes)
 # ✅ Persistent storage via DATA_DIR or local fallback
+# ✅ Environment loaded from .env (python-dotenv)
 # ===============================================
 
-import os, tempfile, psutil, logging, time, datetime, io
+import os, tempfile, psutil, logging, time, datetime, io, sys
 from typing import Optional
+from dotenv import load_dotenv  # ✅ NEW
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -19,21 +21,40 @@ from faster_whisper import WhisperModel
 from pydub import AudioSegment
 import soundfile as sf
 
+# -------- Load and verify environment --------
+if not load_dotenv():
+    print("⚠️  .env not found — using system environment variables")
+
+required_env = ["HF_MODEL", "DEVICE", "COMPUTE_TYPE", "DATA_DIR"]
+missing = [k for k in required_env if not os.getenv(k)]
+if missing:
+    print(f"❌ Missing required environment variables: {missing}")
+    sys.exit(1)
+
 # -------- Environment detection --------
 IS_RENDER = os.path.exists("/opt/render")
 BASE_DIR = "/opt/render/project/src" if IS_RENDER else os.getcwd()
 os.chdir(BASE_DIR)
 
 # -------- Config --------
-HF_MODEL = os.getenv("HF_MODEL", "gana1215/MN_Whisper_Small_CT2")
+HF_MODEL = os.getenv("HF_MODEL")
 DEVICE = os.getenv("DEVICE", "cpu")
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))  # 10 MB
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))
 MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))
 DIAG = os.getenv("DIAG", "0") == "1"
+DATA_DIR = os.getenv("DATA_DIR")
+
+print("✅ Environment configuration loaded:")
+print(f"   HF_MODEL        → {HF_MODEL}")
+print(f"   DEVICE          → {DEVICE}")
+print(f"   COMPUTE_TYPE    → {COMPUTE_TYPE}")
+print(f"   DATA_DIR        → {DATA_DIR}")
+print(f"   MAX_UPLOAD_BYTES→ {MAX_UPLOAD_BYTES}")
+print(f"   MAX_DURATION_SEC→ {MAX_DURATION_SEC}")
+print(f"   DIAG            → {DIAG}")
 
 # --- Storage folders ---
-DATA_DIR = os.getenv("DATA_DIR")
 if DATA_DIR and os.path.exists(DATA_DIR):
     ARCHIVE_DIR = DATA_DIR
 else:
@@ -59,7 +80,7 @@ def log_memory(label=""):
         logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
 
 # -------- FastAPI setup --------
-app = FastAPI(title="Mongolian Whisper API", version="1.9.5")
+app = FastAPI(title="Mongolian Whisper API", version="1.9.6")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -149,11 +170,10 @@ async def transcribe(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to save temp file: {e}")
 
-    # --- Decode (format hint for iOS/webm) ---
+    # --- Decode (format hint for iOS/webm/ogg) ---
     dur = None
     try:
         fmt = None
-        # Explicit hints improve reliability across browsers
         if "mp4" in ct or "aac" in ct or (file.filename and file.filename.lower().endswith(".mp4")):
             fmt = "mp4"
         elif "webm" in ct or (file.filename and file.filename.lower().endswith(".webm")):
@@ -162,8 +182,6 @@ async def transcribe(
             fmt = "ogg"
 
         audio = AudioSegment.from_file(src_path, format=fmt)
-
-        # ✅ Normalize to TRUE PCM WAV: 44.1kHz, mono, 16-bit (Safari-safe)
         audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
         dur = len(audio) / 1000.0
         if dur > MAX_DURATION_SEC:
@@ -175,12 +193,11 @@ async def transcribe(
         logging.warning(f"⚠️ pydub decode failed ({e}); trying fallback...")
         try:
             data, sr = sf.read(src_path, dtype="float32", always_2d=False)
-            # Build a WAV segment from raw samples, then normalize
             raw_wav = AudioSegment(
-                (data.tobytes()),
+                data.tobytes(),
                 frame_rate=sr,
-                sample_width=4,  # float32 bytes
-                channels=1 if (len(getattr(data, 'shape', [])) == 1) else data.shape[1],
+                sample_width=4,
+                channels=1 if len(getattr(data, 'shape', [])) == 1 else data.shape[1],
             )
             audio = raw_wav.set_frame_rate(44100).set_channels(1).set_sample_width(2)
             dur = len(audio) / 1000.0
@@ -195,11 +212,10 @@ async def transcribe(
     final_path = os.path.join(ARCHIVE_WAV_DIR, final_name)
 
     try:
-        # Force encoder: PCM signed 16-bit little endian, 44.1kHz mono
         audio.export(
             final_path,
             format="wav",
-            parameters=["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1"]
+            parameters=["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1"],
         )
         dlog(f"💾 Saved final WAV: {final_path}")
         dlog(f"🎚 Format: {audio.frame_rate}Hz, {audio.channels}ch, {audio.sample_width*8}-bit")

@@ -3,6 +3,9 @@
 # FastAPI + Faster-Whisper backend
 # =============================
 
+# --- Environment ---
+python-dotenv==1.0.1
+
 # --- Core Framework ---
 fastapi==0.115.0
 uvicorn==0.38.0
