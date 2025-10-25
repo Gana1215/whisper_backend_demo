@@ -1,7 +1,7 @@
 # ===============================================
 # 🎙️ Mongolian Whisper API (FastAPI + Faster-Whisper)
 # ✅ Unified storage — /record_archive/wavs only (no /uploads)
-# ✅ Robust decoding (pydub + fallback)
+# ✅ Robust decoding (pydub + fallback + Safari fix)
 # ✅ Works on local & Render environments
 # ✅ Handles mobile uploads (iOS/Android)
 # ✅ Creates permanent WAVs (usr001_*.wav) for playback
@@ -35,8 +35,6 @@ MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))
 DIAG = os.getenv("DIAG", "0") == "1"
 
 # --- Storage folders ---
-# ✅ If DATA_DIR (Render mount) exists, use it.
-# ✅ Else fallback to your local "local_persistent" directory.
 DATA_DIR = os.getenv("DATA_DIR")
 if DATA_DIR and os.path.exists(DATA_DIR):
     ARCHIVE_DIR = DATA_DIR
@@ -63,7 +61,7 @@ def log_memory(label=""):
         logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
 
 # -------- FastAPI setup --------
-app = FastAPI(title="Mongolian Whisper API", version="1.9.2")
+app = FastAPI(title="Mongolian Whisper API", version="1.9.3")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -127,7 +125,7 @@ class TranscribeResult(BaseModel):
     time_ms: Optional[float] = None
     playback_path: Optional[str] = None
 
-# -------- Main endpoint (inference only; no CSV writes) --------
+# -------- Main endpoint --------
 @app.post("/transcribe", response_model=TranscribeResult)
 async def transcribe(
     request: Request,
@@ -157,17 +155,22 @@ async def transcribe(
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(contents)
             src_path = tmp.name
-        dlog(f"📥 Uploaded file → {src_path}")
+        dlog(f"📥 Uploaded file → {src_path} ({ct})")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to save temp file: {e}")
 
-    # --- Decode with pydub to WAV ---
+    # --- Decode with pydub to WAV (Safari AAC/mp4 fix) ---
     dur = None
     try:
-        audio = AudioSegment.from_file(src_path)
+        # ✅ Force correct format for iOS Safari uploads (AAC/mp4)
+        fmt = None
+        if "mp4" in ct or "aac" in ct or (file.filename and file.filename.endswith(".mp4")):
+            fmt = "mp4"
+        audio = AudioSegment.from_file(src_path, format=fmt)
         dur = len(audio) / 1000.0
         if dur > MAX_DURATION_SEC:
             raise HTTPException(status_code=413, detail=f"Audio too long ({dur:.1f}s).")
+        dlog(f"🎧 Decoded {ct} (format={fmt or 'auto'}) → {dur:.2f}s")
     except HTTPException:
         raise
     except Exception as e:
@@ -176,6 +179,7 @@ async def transcribe(
             data, sr = sf.read(src_path, dtype="float32", always_2d=False)
             dur = len(data) / float(sr)
             audio = AudioSegment.from_file(io.BytesIO(data.tobytes()), format="wav")
+            dlog(f"🎧 Fallback decode OK → {dur:.2f}s")
         except Exception as e2:
             logging.error(f"❌ Fallback decode failed: {e2}")
             raise HTTPException(status_code=400, detail="Unsupported audio format.")
@@ -186,6 +190,7 @@ async def transcribe(
     final_path = os.path.join(ARCHIVE_WAV_DIR, final_name)
 
     try:
+        # ✅ Always re-encode to true PCM_S16LE WAV
         audio.export(final_path, format="wav", parameters=["-acodec", "pcm_s16le"])
         dlog(f"💾 Saved final WAV: {final_path}")
     except Exception as e:
