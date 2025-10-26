@@ -30,6 +30,9 @@
 # ✅ Logs "EMPTY_AUDIO" when text is empty
 # ✅ Compatible with Render persistent disk (/local_persistent/record_archive)
 # ===============================================
+# ===============================================
+# 📚 dataset_routes.py (v3.1 — Stable PCM Export + List Fix)
+# ===============================================
 
 import os, csv, aiofiles, io, datetime, shutil, tempfile
 from fastapi import APIRouter, UploadFile, Form, Request, HTTPException
@@ -40,13 +43,13 @@ import soundfile as sf
 router = APIRouter(prefix="/dataset", tags=["dataset"])
 
 # =====================================================
-# 🌐 Resolve shared persistent dataset directory
+# 🌐 Resolve dataset directory
 # =====================================================
 BASE_DIR = os.getcwd()
 LOCAL_PERSISTENT = os.path.join(BASE_DIR, "local_persistent", "record_archive")
 ENV_DATA_DIR = os.getenv("DATA_DIR")
 
-if ENV_DATA_DIR:
+if ENV_DATA_DIR and os.path.exists(ENV_DATA_DIR):
     ARCHIVE_DIR = ENV_DATA_DIR
 elif os.path.isdir(LOCAL_PERSISTENT):
     ARCHIVE_DIR = LOCAL_PERSISTENT
@@ -59,17 +62,15 @@ WAV_DIR = os.path.join(ARCHIVE_DIR, "wavs")
 CSV_PATH = os.path.join(ARCHIVE_DIR, "metadata.csv")
 os.makedirs(WAV_DIR, exist_ok=True)
 
-# ✅ Ensure metadata.csv has header
+# ✅ Ensure CSV header
 if not os.path.exists(CSV_PATH):
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(["file_name", "text"])
 
-
 # =====================================================
-# ✳️ Helper: append metadata entry
+# ✳️ Helper: append metadata
 # =====================================================
 def append_metadata(file_name: str, text: str):
-    """Safely append a new entry to metadata.csv if not already present."""
     try:
         if not os.path.exists(CSV_PATH) or os.path.getsize(CSV_PATH) == 0:
             with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
@@ -82,7 +83,7 @@ def append_metadata(file_name: str, text: str):
                 existing.add(r["file_name"])
 
         rel_path = f"wavs/{os.path.basename(file_name)}"
-        clean_text = text.strip() if text and text.strip() else "EMPTY_AUDIO"
+        clean_text = text.strip() if text.strip() else "EMPTY_AUDIO"
 
         if rel_path not in existing:
             with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
@@ -94,31 +95,29 @@ def append_metadata(file_name: str, text: str):
     except Exception as e:
         print(f"❌ Failed to append metadata: {e}")
 
-
 # =====================================================
-# 🟢 /dataset/add — with conversion to PCM WAV
+# 🟢 /dataset/add — Converts & saves as PCM WAV
 # =====================================================
 @router.post("/add")
 async def add_sample(file: UploadFile, text: str = Form(...)):
-    """
-    Add a new manually uploaded sample to the dataset.
-    Converts any format (AAC/MP4/WebM/WAV) into true PCM WAV (44.1kHz, mono, 16-bit).
-    """
     try:
-        # --- Unique filename ---
+        # --- Sanitize & fix filename ---
+        base = os.path.splitext(os.path.basename(file.filename))[0]
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_name = os.path.splitext(os.path.basename(file.filename))[0]
-        final_name = f"{base_name}_{timestamp}.wav"
+        if base.startswith("usr001_") and len(base.split("_")) >= 3:
+            final_name = f"{base}.wav"        # already has timestamp
+        else:
+            final_name = f"{base}_{timestamp}.wav"
         final_path = os.path.join(WAV_DIR, final_name)
 
         contents = await file.read()
         if not contents:
-            raise HTTPException(status_code=400, detail="Empty file upload.")
+            raise HTTPException(status_code=400, detail="Empty file upload")
 
         # --- Detect format ---
         ct = file.content_type or ""
         fmt = None
-        if "mp4" in ct or "aac" in ct:
+        if any(k in ct for k in ["mp4", "aac", "m4a"]):
             fmt = "mp4"
         elif "webm" in ct:
             fmt = "webm"
@@ -126,8 +125,10 @@ async def add_sample(file: UploadFile, text: str = Form(...)):
             fmt = "ogg"
         elif "wav" in ct:
             fmt = "wav"
+        else:
+            fmt = "wav"  # fallback
 
-        # --- Decode (pydub first, sf fallback) ---
+        # --- Decode (pydub + fallback) ---
         try:
             audio = AudioSegment.from_file(io.BytesIO(contents), format=fmt)
         except Exception as e:
@@ -144,14 +145,14 @@ async def add_sample(file: UploadFile, text: str = Form(...)):
             except Exception as e2:
                 raise HTTPException(status_code=400, detail=f"Unsupported audio format ({e2})")
 
-        # --- Convert to PCM RIFF WAV ---
+        # --- Convert to standard PCM WAV ---
         audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
         audio.export(
             final_path,
             format="wav",
             parameters=["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1"],
         )
-        print(f"💾 Saved true PCM WAV → {final_path}")
+        print(f"💾 Saved PCM WAV → {final_path}")
 
         # --- Append metadata ---
         append_metadata(final_name, text)
@@ -162,22 +163,66 @@ async def add_sample(file: UploadFile, text: str = Form(...)):
         print(f"❌ Failed to add sample: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
 # =====================================================
-# 🟨 Other dataset routes unchanged
+# 🧾 /dataset/list — Fixed version
 # =====================================================
-@router.post("/update")
-async def update_sample(request: Request):
-    ...
-@router.post("/delete")
-async def delete_sample(request: Request):
-    ...
-@router.post("/cleanup")
-async def cleanup_orphans():
-    ...
 @router.get("/list")
 async def list_samples():
-    ...
+    try:
+        print(f"DEBUG: Listing from {CSV_PATH}")
+        if not os.path.exists(CSV_PATH):
+            return {"count": 0, "samples": []}
+
+        rows = []
+        with open(CSV_PATH, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                if not r:
+                    continue
+                clean = {k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in r.items() if k}
+                rows.append(clean)
+
+        print(f"DEBUG: Loaded {len(rows)} rows")
+        return {"count": len(rows), "samples": rows}
+
+    except Exception as e:
+        print(f"❌ /dataset/list failed: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# =====================================================
+# 🧹 /cleanup and /export remain same
+# =====================================================
+@router.post("/cleanup")
+async def cleanup_orphans():
+    try:
+        valid = set()
+        if os.path.exists(CSV_PATH):
+            with open(CSV_PATH, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for r in reader:
+                    valid.add(os.path.basename(r["file_name"]))
+        removed = 0
+        for f in os.listdir(WAV_DIR):
+            if f.endswith(".wav") and f not in valid:
+                os.remove(os.path.join(WAV_DIR, f))
+                removed += 1
+        return {"status": "ok", "removed": removed}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 @router.get("/export")
 async def export_dataset():
-    ...
+    try:
+        if not os.path.exists(CSV_PATH) or os.stat(CSV_PATH).st_size == 0:
+            return JSONResponse(status_code=400, content={"error": "No dataset entries yet."})
+        tmp_dir = tempfile.gettempdir()
+        zip_base = os.path.join(tmp_dir, "dataset_export")
+        zip_path = f"{zip_base}.zip"
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+        shutil.make_archive(zip_base, "zip", ARCHIVE_DIR)
+        print(f"📦 Dataset exported → {zip_path}")
+        return FileResponse(zip_path, filename="dataset_export.zip", media_type="application/zip")
+    except Exception as e:
+        print(f"❌ Export failed: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
