@@ -1,11 +1,11 @@
 # ===============================================
-# 📚 dataset_routes.py (v3.5 — Final Mobile-Safe + PCM Stable)
-# ✅ Handles AAC/MP4/M4A/WebM/WAV seamlessly (iOS + Android + Desktop)
-# ✅ Uses temp file decode for maximum Safari reliability
-# ✅ Keeps delete, list, export, and PCM conversion unchanged
+# 📚 dataset_routes.py (v3.7 — Render Stable + Mobile WebM Fix)
+# ✅ Adds /dataset/add and /dataset/update (for DB + text edit)
+# ✅ Fully mobile-safe decode for webm/mp4/m4a/aac
+# ✅ Works with app.py v2.1
 # ===============================================
 
-import os, csv, io, datetime, shutil, tempfile
+import os, csv, io, datetime, shutil, tempfile, subprocess
 from fastapi import APIRouter, UploadFile, Form, Request, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from pydub import AudioSegment
@@ -38,25 +38,21 @@ if not os.path.exists(CSV_PATH):
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(["file_name", "text"])
 
+
 # =====================================================
 # ✳️ Helper: append metadata
 # =====================================================
 def append_metadata(file_name: str, text: str):
+    rel_path = f"wavs/{os.path.basename(file_name)}"
+    clean_text = text.strip() if text.strip() else "EMPTY_AUDIO"
     try:
-        if not os.path.exists(CSV_PATH) or os.path.getsize(CSV_PATH) == 0:
-            with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(["file_name", "text"])
+        rows = []
+        if os.path.exists(CSV_PATH):
+            with open(CSV_PATH, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
 
-        existing = set()
-        with open(CSV_PATH, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for r in reader:
-                existing.add(r["file_name"])
-
-        rel_path = f"wavs/{os.path.basename(file_name)}"
-        clean_text = text.strip() if text.strip() else "EMPTY_AUDIO"
-
-        if rel_path not in existing:
+        if not any(r["file_name"] == rel_path for r in rows):
             with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow([rel_path, clean_text])
             print(f"🧾 Added → {rel_path} | text='{clean_text}'")
@@ -65,24 +61,22 @@ def append_metadata(file_name: str, text: str):
     except Exception as e:
         print(f"❌ append_metadata failed: {e}")
 
+
 # =====================================================
-# 🔁 /dataset/update_audio — Re-record existing row (Mobile Safe)
+# 🆕 /dataset/add — Save new sample
 # =====================================================
-@router.post("/update_audio")
-async def update_audio(file: UploadFile, file_name: str = Form(...)):
-    """Replace an existing WAV with new recording (keeps metadata intact)."""
+@router.post("/add")
+async def add_sample(file: UploadFile = UploadFile, text: str = Form(...)):
+    """Add new audio file + text to dataset."""
     try:
-        clean_name = os.path.basename(file_name)
-        target_path = os.path.join(WAV_DIR, clean_name)
-
-        if not os.path.exists(target_path):
-            raise HTTPException(status_code=404, detail=f"{file_name} not found")
-
         contents = await file.read()
         if not contents:
             raise HTTPException(status_code=400, detail="Empty file upload")
 
-        # --- Detect probable format ---
+        clean_name = f"usr001_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+        target_path = os.path.join(WAV_DIR, clean_name)
+
+        # Detect format
         ct = (file.content_type or "").lower()
         ext = os.path.splitext(file.filename or "")[1].lower()
         fmt = "wav"
@@ -93,39 +87,83 @@ async def update_audio(file: UploadFile, file_name: str = Form(...)):
         elif "ogg" in ct or ext == ".ogg":
             fmt = "ogg"
 
-        # --- Save to temp file before decode (Safari-safe) ---
+        # Temp decode
         tmp_path = tempfile.mktemp(suffix=f".{fmt}")
         with open(tmp_path, "wb") as tmp:
             tmp.write(contents)
 
-        # --- Decode using pydub or fallback ---
         try:
             audio = AudioSegment.from_file(tmp_path, format=fmt)
         except Exception as e:
-            print(f"⚠️ pydub decode failed ({e}); trying soundfile fallback...")
+            print(f"⚠️ pydub decode failed ({e}); trying ffmpeg pipe fallback...")
             try:
-                data, sr = sf.read(tmp_path, dtype="float32", always_2d=False)
-                raw = AudioSegment(
-                    data.tobytes(),
-                    frame_rate=sr,
-                    sample_width=4,
-                    channels=1 if len(getattr(data, 'shape', [])) == 1 else data.shape[1],
-                )
-                audio = raw
+                tmp_wav = tempfile.mktemp(suffix=".wav")
+                cmd = ["ffmpeg", "-y", "-i", tmp_path, "-ac", "1", "-ar", "44100", tmp_wav]
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                audio = AudioSegment.from_file(tmp_wav, format="wav")
+                os.remove(tmp_wav)
             except Exception as e2:
                 os.remove(tmp_path)
                 raise HTTPException(status_code=400, detail=f"Unsupported audio format ({e2})")
 
-        # Cleanup temp file
         os.remove(tmp_path)
-
-        # --- Convert & overwrite existing WAV ---
         audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
-        audio.export(
-            target_path,
-            format="wav",
-            parameters=["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1"],
-        )
+        audio.export(target_path, format="wav")
+        append_metadata(clean_name, text)
+
+        return {"status": "ok", "file_name": clean_name, "text": text}
+    except Exception as e:
+        print(f"❌ add_sample failed: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# =====================================================
+# 🔁 /dataset/update_audio — Re-record existing row (Mobile Safe)
+# =====================================================
+@router.post("/update_audio")
+async def update_audio(file: UploadFile, file_name: str = Form(...)):
+    """Replace existing WAV (keeps metadata intact)."""
+    try:
+        clean_name = os.path.basename(file_name)
+        target_path = os.path.join(WAV_DIR, clean_name)
+        if not os.path.exists(target_path):
+            raise HTTPException(status_code=404, detail=f"{file_name} not found")
+
+        contents = await file.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty file upload")
+
+        ct = (file.content_type or "").lower()
+        ext = os.path.splitext(file.filename or "")[1].lower()
+        fmt = "wav"
+        if "webm" in ct or ext == ".webm":
+            fmt = "webm"
+        elif any(k in ct for k in ["mp4", "aac", "m4a"]) or ext in [".mp4", ".m4a", ".aac"]:
+            fmt = "mp4"
+        elif "ogg" in ct or ext == ".ogg":
+            fmt = "ogg"
+
+        tmp_path = tempfile.mktemp(suffix=f".{fmt}")
+        with open(tmp_path, "wb") as tmp:
+            tmp.write(contents)
+
+        try:
+            audio = AudioSegment.from_file(tmp_path, format=fmt)
+        except Exception as e:
+            print(f"⚠️ pydub decode failed ({e}); trying ffmpeg pipe fallback...")
+            try:
+                tmp_wav = tempfile.mktemp(suffix=".wav")
+                cmd = ["ffmpeg", "-y", "-i", tmp_path, "-ac", "1", "-ar", "44100", tmp_wav]
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                audio = AudioSegment.from_file(tmp_wav, format="wav")
+                os.remove(tmp_wav)
+            except Exception as e2:
+                os.remove(tmp_path)
+                raise HTTPException(status_code=400, detail=f"Unsupported audio format ({e2})")
+
+        os.remove(tmp_path)
+        audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
+        audio.export(target_path, format="wav")
         print(f"🔁 Re-record replaced → {target_path}")
         return {"status": "ok", "message": f"{clean_name} updated successfully"}
 
@@ -133,12 +171,56 @@ async def update_audio(file: UploadFile, file_name: str = Form(...)):
         print(f"❌ update_audio failed: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
 # =====================================================
-# 🗑️ /dataset/delete — Safe delete (prefix agnostic)
+# 📝 /dataset/update — Update text only
+# =====================================================
+@router.post("/update")
+async def update_text(request: Request):
+    """Update text field in metadata.csv for given file_name."""
+    try:
+        if request.headers.get("content-type", "").startswith("application/json"):
+            data = await request.json()
+            file_name = data.get("file_name")
+            text = data.get("text")
+        else:
+            form = await request.form()
+            file_name = form.get("file_name")
+            text = form.get("text")
+
+        if not file_name:
+            raise HTTPException(status_code=400, detail="file_name missing")
+
+        clean_name = os.path.basename(file_name)
+        rows = []
+        updated = False
+        with open(CSV_PATH, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                if os.path.basename(r["file_name"]) == clean_name:
+                    r["text"] = text.strip()
+                    updated = True
+                rows.append(r)
+
+        if not updated:
+            raise HTTPException(status_code=404, detail=f"{file_name} not found")
+
+        with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["file_name", "text"])
+            writer.writeheader()
+            writer.writerows(rows)
+
+        return {"status": "ok", "message": f"{clean_name} text updated"}
+    except Exception as e:
+        print(f"❌ update_text failed: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# =====================================================
+# 🗑️ /dataset/delete
 # =====================================================
 @router.post("/delete")
 async def delete_sample(request: Request):
-    """Delete dataset entry and its WAV file (handles wavs/ prefix)."""
     try:
         if request.headers.get("content-type", "").startswith("application/json"):
             data = await request.json()
@@ -153,7 +235,6 @@ async def delete_sample(request: Request):
         clean_name = os.path.basename(file_name)
         target_wav = os.path.join(WAV_DIR, clean_name)
 
-        # --- Rewrite CSV ---
         rows, found = [], False
         with open(CSV_PATH, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -176,10 +257,10 @@ async def delete_sample(request: Request):
             print(f"🗑️ Deleted → {target_wav}")
 
         return {"status": "ok", "message": f"{clean_name} deleted"}
-
     except Exception as e:
         print(f"❌ delete_sample failed: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 # =====================================================
 # 🧾 /dataset/list
@@ -200,6 +281,7 @@ async def list_samples():
     except Exception as e:
         print(f"❌ list_samples failed: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 # =====================================================
 # 📦 /dataset/export

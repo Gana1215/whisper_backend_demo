@@ -1,9 +1,9 @@
 # ===============================================
 # 🎙️ Mongolian Whisper API (FastAPI + Faster-Whisper)
-# ✅ Handles iOS/Android/Desktop recording formats (mp4, m4a, aac, webm, wav)
-# ✅ Uses temp file decode (Safari-safe)
-# ✅ Works on Render + local + mobile browsers
-# ✅ Unified with dataset_routes v3.5 logic
+# ✅ Fixed: /dataset routes now fully mounted (DB save + edit text work)
+# ✅ Handles iOS/Android/Desktop formats (mp4, m4a, aac, webm, wav)
+# ✅ Unified with dataset_routes v3.6+
+# ✅ Render + local tested, mobile-safe
 # ===============================================
 
 import os, tempfile, psutil, logging, time, io, sys
@@ -70,7 +70,7 @@ def log_memory(label=""):
         logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
 
 # -------- FastAPI setup --------
-app = FastAPI(title="Mongolian Whisper API", version="2.0.0")
+app = FastAPI(title="Mongolian Whisper API", version="2.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -79,13 +79,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---- Include dataset routes ----
+# ---- Include dataset routes (explicit mount, visible log) ----
 try:
-    import dataset_routes
-    app.include_router(dataset_routes.router)
-    print("✅ dataset_routes mounted at /dataset/*")
+    from dataset_routes import router as dataset_router
+    app.include_router(dataset_router)
+    print("✅ Mounted /dataset routes successfully")
 except Exception as e:
-    logging.warning(f"⚠️ dataset_routes not available ({e})")
+    print(f"❌ dataset_routes import failed: {e}")
 
 # ---- Static mount for playback ----
 app.mount("/record_archive", StaticFiles(directory=ARCHIVE_DIR), name="record_archive")
