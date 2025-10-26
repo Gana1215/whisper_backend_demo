@@ -1,14 +1,12 @@
 # ===============================================
 # 🎙️ Mongolian Whisper API (FastAPI + Faster-Whisper)
-# ✅ Unified storage — /record_archive/wavs only (no /uploads)
-# ✅ Robust decoding (pydub + fallback + Safari/iOS fix)
-# ✅ Works on local & Render environments
-# ✅ Handles mobile uploads (iOS/Android)
-# ✅ Inference-only (no permanent WAV writes)
-# ✅ Persistent storage handled separately by /dataset/add
+# ✅ Handles iOS/Android/Desktop recording formats (mp4, m4a, aac, webm, wav)
+# ✅ Uses temp file decode (Safari-safe)
+# ✅ Works on Render + local + mobile browsers
+# ✅ Unified with dataset_routes v3.5 logic
 # ===============================================
 
-import os, tempfile, psutil, logging, time, datetime, io, sys
+import os, tempfile, psutil, logging, time, io, sys
 from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
@@ -23,7 +21,6 @@ import soundfile as sf
 if not load_dotenv():
     print("⚠️  .env not found — using system environment variables")
 
-# --- Required variables ---
 required_env = ["HF_MODEL", "DEVICE", "COMPUTE_TYPE", "DATA_DIR"]
 missing = [k for k in required_env if not os.getenv(k)]
 if missing:
@@ -73,7 +70,7 @@ def log_memory(label=""):
         logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
 
 # -------- FastAPI setup --------
-app = FastAPI(title="Mongolian Whisper API", version="1.9.8")
+app = FastAPI(title="Mongolian Whisper API", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -82,7 +79,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---- Include dataset routes if available ----
+# ---- Include dataset routes ----
 try:
     import dataset_routes
     app.include_router(dataset_routes.router)
@@ -144,9 +141,7 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
     log_memory("Before transcription")
-
-    # --- MIME / size check ---
-    ct = file.content_type or ""
+    ct = (file.content_type or "").lower()
     if not (ct.startswith("audio/") or ct == "application/octet-stream"):
         raise HTTPException(status_code=415, detail=f"Unsupported type: {ct}")
 
@@ -154,45 +149,56 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File too large.")
 
-    # --- Save upload to temp file ---
-    suffix = os.path.splitext(file.filename or "")[-1] or ".wav"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(contents)
-        src_path = tmp.name
-    dlog(f"📥 Uploaded file → {src_path} ({ct})")
-
-    # --- Decode (multi-format) ---
+    # --- Decode (multi-format, mobile-safe) ---
     dur = None
     try:
-        fmt = None
-        if "mp4" in ct or "aac" in ct: fmt = "mp4"
-        elif "webm" in ct: fmt = "webm"
-        elif "ogg" in ct: fmt = "ogg"
+        fmt = "wav"
+        ext = os.path.splitext(file.filename or "")[1].lower()
 
-        audio = AudioSegment.from_file(src_path, format=fmt)
+        if "webm" in ct or ext == ".webm":
+            fmt = "webm"
+        elif any(k in ct for k in ["mp4", "m4a", "aac"]) or ext in [".mp4", ".m4a", ".aac"]:
+            fmt = "mp4"
+        elif "ogg" in ct or ext == ".ogg":
+            fmt = "ogg"
+        elif "wav" in ct or ext == ".wav":
+            fmt = "wav"
+
+        tmp_decode = tempfile.mktemp(suffix=f".{fmt}")
+        with open(tmp_decode, "wb") as tmp:
+            tmp.write(contents)
+
+        try:
+            audio = AudioSegment.from_file(tmp_decode, format=fmt)
+        except Exception as e:
+            logging.warning(f"⚠️ pydub decode failed ({e}); trying fallback...")
+            try:
+                data, sr = sf.read(tmp_decode, dtype="float32", always_2d=False)
+                raw = AudioSegment(
+                    data.tobytes(),
+                    frame_rate=sr,
+                    sample_width=4,
+                    channels=1 if len(getattr(data, 'shape', [])) == 1 else data.shape[1],
+                )
+                audio = raw
+            except Exception as e2:
+                logging.error(f"❌ Fallback decode failed: {e2}")
+                os.remove(tmp_decode)
+                raise HTTPException(status_code=400, detail=f"Unsupported audio format ({e2})")
+
+        os.remove(tmp_decode)
         audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
         dur = len(audio) / 1000.0
         if dur > MAX_DURATION_SEC:
             raise HTTPException(status_code=413, detail=f"Audio too long ({dur:.1f}s).")
-        dlog(f"🎧 Decoded {ct} (fmt={fmt or 'auto'}) → {dur:.2f}s")
-    except Exception as e:
-        logging.warning(f"⚠️ pydub decode failed ({e}); trying fallback...")
-        try:
-            data, sr = sf.read(src_path, dtype="float32", always_2d=False)
-            raw = AudioSegment(
-                data.tobytes(),
-                frame_rate=sr,
-                sample_width=4,
-                channels=1 if len(getattr(data, 'shape', [])) == 1 else data.shape[1],
-            )
-            audio = raw.set_frame_rate(44100).set_channels(1).set_sample_width(2)
-            dur = len(audio) / 1000.0
-            dlog(f"🎧 Fallback decode OK → {dur:.2f}s")
-        except Exception as e2:
-            logging.error(f"❌ Fallback decode failed: {e2}")
-            raise HTTPException(status_code=400, detail=f"Unsupported audio format ({e2})")
 
-    # --- Create temp WAV for inference ---
+        dlog(f"🎧 Decoded {ct} (fmt={fmt}) → {dur:.2f}s")
+
+    except Exception as e:
+        logging.error(f"❌ Decode failed ({ct}): {e}")
+        raise HTTPException(status_code=400, detail=f"Unsupported audio format ({e})")
+
+    # --- Export WAV for inference ---
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
         audio.export(tmp_wav.name, format="wav")
         tmp_wav_path = tmp_wav.name
@@ -221,10 +227,10 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
             language=getattr(info, "language", "mn"),
             duration_sec=dur,
             time_ms=elapsed_ms,
-            playback_path=None  # playback uses blob, not file
+            playback_path=None
         )
     finally:
-        for p in [src_path, tmp_wav_path]:
+        for p in [tmp_wav_path]:
             if os.path.exists(p):
                 os.remove(p)
                 dlog(f"🧹 Temp removed: {p}")

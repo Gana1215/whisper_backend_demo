@@ -1,6 +1,7 @@
 # ===============================================
-# 📚 dataset_routes.py (v3.4 — Mobile-Safe Decode + Stable PCM)
-# ✅ Handles AAC/MP4/M4A/WebM/WAV seamlessly (for iOS & Android)
+# 📚 dataset_routes.py (v3.5 — Final Mobile-Safe + PCM Stable)
+# ✅ Handles AAC/MP4/M4A/WebM/WAV seamlessly (iOS + Android + Desktop)
+# ✅ Uses temp file decode for maximum Safari reliability
 # ✅ Keeps delete, list, export, and PCM conversion unchanged
 # ===============================================
 
@@ -65,7 +66,7 @@ def append_metadata(file_name: str, text: str):
         print(f"❌ append_metadata failed: {e}")
 
 # =====================================================
-# 🔁 /dataset/update_audio — Re-record existing row
+# 🔁 /dataset/update_audio — Re-record existing row (Mobile Safe)
 # =====================================================
 @router.post("/update_audio")
 async def update_audio(file: UploadFile, file_name: str = Form(...)):
@@ -81,7 +82,7 @@ async def update_audio(file: UploadFile, file_name: str = Form(...)):
         if not contents:
             raise HTTPException(status_code=400, detail="Empty file upload")
 
-        # --- Robust format detection ---
+        # --- Detect probable format ---
         ct = (file.content_type or "").lower()
         ext = os.path.splitext(file.filename or "")[1].lower()
         fmt = "wav"
@@ -92,13 +93,18 @@ async def update_audio(file: UploadFile, file_name: str = Form(...)):
         elif "ogg" in ct or ext == ".ogg":
             fmt = "ogg"
 
-        # --- Decode safely ---
+        # --- Save to temp file before decode (Safari-safe) ---
+        tmp_path = tempfile.mktemp(suffix=f".{fmt}")
+        with open(tmp_path, "wb") as tmp:
+            tmp.write(contents)
+
+        # --- Decode using pydub or fallback ---
         try:
-            audio = AudioSegment.from_file(io.BytesIO(contents), format=fmt)
+            audio = AudioSegment.from_file(tmp_path, format=fmt)
         except Exception as e:
             print(f"⚠️ pydub decode failed ({e}); trying soundfile fallback...")
             try:
-                data, sr = sf.read(io.BytesIO(contents), dtype="float32", always_2d=False)
+                data, sr = sf.read(tmp_path, dtype="float32", always_2d=False)
                 raw = AudioSegment(
                     data.tobytes(),
                     frame_rate=sr,
@@ -107,9 +113,13 @@ async def update_audio(file: UploadFile, file_name: str = Form(...)):
                 )
                 audio = raw
             except Exception as e2:
+                os.remove(tmp_path)
                 raise HTTPException(status_code=400, detail=f"Unsupported audio format ({e2})")
 
-        # --- Convert & overwrite ---
+        # Cleanup temp file
+        os.remove(tmp_path)
+
+        # --- Convert & overwrite existing WAV ---
         audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
         audio.export(
             target_path,
