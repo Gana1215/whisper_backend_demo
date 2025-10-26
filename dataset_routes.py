@@ -1,40 +1,12 @@
-# =====================================================
-# 🟢 /dataset/add — Persistent Save (after /transcribe)
-# =====================================================
-"""
-🚀 Purpose:
-    This route is called when the user clicks the "💾 Save to DB" button.
-
-📍 Flow Summary:
-    1. User records audio in browser → browser sends blob to /transcribe
-       - /transcribe decodes & transcribes it temporarily (no permanent save)
-       - The browser can immediately playback its local blob
-    2. When user clicks "Save to DB":
-       - The frontend re-uploads that same recorded blob to this route (/dataset/add)
-       - This route converts and stores a *permanent* version:
-            ✅ Converts any format (AAC, MP4, WebM, WAV, etc.)
-            ✅ Re-encodes to standard RIFF PCM WAV (mono, 44.1kHz, 16-bit)
-            ✅ Saves it under /record_archive/wavs/
-            ✅ Appends the filename + transcription text to metadata.csv
-
-💡 Why this split:
-    - /transcribe should remain fast and lightweight (no disk writes)
-    - /dataset/add handles dataset persistence and uniform audio formatting
-"""
-
-
 # ===============================================
-# 📚 dataset_routes.py (v3.0 — True PCM Export + Stable Save)
-# ✅ Converts uploaded files to RIFF PCM WAV (mono, 44.1kHz, 16-bit)
-# ✅ Prevents duplicate entries in metadata.csv
-# ✅ Logs "EMPTY_AUDIO" when text is empty
-# ✅ Compatible with Render persistent disk (/local_persistent/record_archive)
-# ===============================================
-# ===============================================
-# 📚 dataset_routes.py (v3.1 — Stable PCM Export + List Fix)
+# 📚 dataset_routes.py (v3.2 — PCM Stable + Re-Record + Export)
+# ✅ Converts all uploads to RIFF PCM WAV (mono, 44.1kHz, 16-bit)
+# ✅ Fixes /list and naming issues
+# ✅ Adds /update_audio (Re-Record)
+# ✅ Adds /export (ZIP Download)
 # ===============================================
 
-import os, csv, aiofiles, io, datetime, shutil, tempfile
+import os, csv, io, datetime, shutil, tempfile
 from fastapi import APIRouter, UploadFile, Form, Request, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from pydub import AudioSegment
@@ -67,6 +39,7 @@ if not os.path.exists(CSV_PATH):
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(["file_name", "text"])
 
+
 # =====================================================
 # ✳️ Helper: append metadata
 # =====================================================
@@ -95,6 +68,7 @@ def append_metadata(file_name: str, text: str):
     except Exception as e:
         print(f"❌ Failed to append metadata: {e}")
 
+
 # =====================================================
 # 🟢 /dataset/add — Converts & saves as PCM WAV
 # =====================================================
@@ -105,7 +79,7 @@ async def add_sample(file: UploadFile, text: str = Form(...)):
         base = os.path.splitext(os.path.basename(file.filename))[0]
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         if base.startswith("usr001_") and len(base.split("_")) >= 3:
-            final_name = f"{base}.wav"        # already has timestamp
+            final_name = f"{base}.wav"  # already has timestamp
         else:
             final_name = f"{base}_{timestamp}.wav"
         final_path = os.path.join(WAV_DIR, final_name)
@@ -163,13 +137,75 @@ async def add_sample(file: UploadFile, text: str = Form(...)):
         print(f"❌ Failed to add sample: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
+# =====================================================
+# 🔁 /dataset/update_audio — Re-record existing row
+# =====================================================
+@router.post("/update_audio")
+async def update_audio(file: UploadFile, file_name: str = Form(...)):
+    """
+    Replace an existing WAV entry with a new recording.
+    Keeps the same file_name and metadata text intact.
+    Converts the new audio to true PCM RIFF WAV (44.1kHz mono 16-bit).
+    """
+    try:
+        target_path = os.path.join(WAV_DIR, os.path.basename(file_name))
+        if not os.path.exists(target_path):
+            raise HTTPException(status_code=404, detail=f"{file_name} not found")
+
+        contents = await file.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty file upload.")
+
+        # --- Decode and normalize ---
+        ct = file.content_type or ""
+        fmt = None
+        if "mp4" in ct or "aac" in ct:
+            fmt = "mp4"
+        elif "webm" in ct:
+            fmt = "webm"
+        elif "ogg" in ct:
+            fmt = "ogg"
+        elif "wav" in ct:
+            fmt = "wav"
+
+        try:
+            audio = AudioSegment.from_file(io.BytesIO(contents), format=fmt)
+        except Exception as e:
+            print(f"⚠️ pydub decode failed ({e}); trying fallback...")
+            try:
+                data, sr = sf.read(io.BytesIO(contents), dtype="float32", always_2d=False)
+                raw = AudioSegment(
+                    data.tobytes(),
+                    frame_rate=sr,
+                    sample_width=4,
+                    channels=1 if len(getattr(data, 'shape', [])) == 1 else data.shape[1],
+                )
+                audio = raw
+            except Exception as e2:
+                raise HTTPException(status_code=400, detail=f"Unsupported audio format ({e2})")
+
+        audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
+        audio.export(
+            target_path,
+            format="wav",
+            parameters=["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1"],
+        )
+
+        print(f"🔁 Re-record replaced → {target_path}")
+        return {"status": "ok", "message": f"{file_name} updated successfully"}
+
+    except Exception as e:
+        print(f"❌ Failed to update audio: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 # =====================================================
 # 🧾 /dataset/list — Fixed version
 # =====================================================
 @router.get("/list")
 async def list_samples():
     try:
-        print(f"DEBUG: Listing from {CSV_PATH}")
         if not os.path.exists(CSV_PATH):
             return {"count": 0, "samples": []}
 
@@ -182,47 +218,41 @@ async def list_samples():
                 clean = {k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in r.items() if k}
                 rows.append(clean)
 
-        print(f"DEBUG: Loaded {len(rows)} rows")
         return {"count": len(rows), "samples": rows}
 
     except Exception as e:
         print(f"❌ /dataset/list failed: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# =====================================================
-# 🧹 /cleanup and /export remain same
-# =====================================================
-@router.post("/cleanup")
-async def cleanup_orphans():
-    try:
-        valid = set()
-        if os.path.exists(CSV_PATH):
-            with open(CSV_PATH, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for r in reader:
-                    valid.add(os.path.basename(r["file_name"]))
-        removed = 0
-        for f in os.listdir(WAV_DIR):
-            if f.endswith(".wav") and f not in valid:
-                os.remove(os.path.join(WAV_DIR, f))
-                removed += 1
-        return {"status": "ok", "removed": removed}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
 
+# =====================================================
+# 📦 /dataset/export — Downloadable ZIP
+# =====================================================
 @router.get("/export")
 async def export_dataset():
+    """
+    Create and return a downloadable ZIP of the dataset (WAVs + metadata.csv).
+    Works globally (browser-initiated download supported).
+    """
     try:
         if not os.path.exists(CSV_PATH) or os.stat(CSV_PATH).st_size == 0:
             return JSONResponse(status_code=400, content={"error": "No dataset entries yet."})
+
         tmp_dir = tempfile.gettempdir()
         zip_base = os.path.join(tmp_dir, "dataset_export")
         zip_path = f"{zip_base}.zip"
+
         if os.path.exists(zip_path):
             os.remove(zip_path)
+
         shutil.make_archive(zip_base, "zip", ARCHIVE_DIR)
         print(f"📦 Dataset exported → {zip_path}")
-        return FileResponse(zip_path, filename="dataset_export.zip", media_type="application/zip")
+
+        return FileResponse(
+            zip_path,
+            filename="MongolianWhisper_Dataset.zip",
+            media_type="application/zip",
+        )
     except Exception as e:
         print(f"❌ Export failed: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
