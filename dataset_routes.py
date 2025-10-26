@@ -1,8 +1,7 @@
 # ===============================================
-# 📚 dataset_routes.py (v3.3 — DeleteFix + ReplaceFix + PCM Stable)
-# ✅ Fixes delete mismatch (prefix handling)
-# ✅ Ensures re-record replaces existing WAV correctly
-# ✅ All other routes unchanged
+# 📚 dataset_routes.py (v3.4 — Mobile-Safe Decode + Stable PCM)
+# ✅ Handles AAC/MP4/M4A/WebM/WAV seamlessly (for iOS & Android)
+# ✅ Keeps delete, list, export, and PCM conversion unchanged
 # ===============================================
 
 import os, csv, io, datetime, shutil, tempfile
@@ -59,12 +58,11 @@ def append_metadata(file_name: str, text: str):
         if rel_path not in existing:
             with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow([rel_path, clean_text])
-            print(f"🧾 Added to metadata.csv → {rel_path} | text='{clean_text}'")
+            print(f"🧾 Added → {rel_path} | text='{clean_text}'")
         else:
             print(f"⚠️ Duplicate skipped: {rel_path}")
-
     except Exception as e:
-        print(f"❌ Failed to append metadata: {e}")
+        print(f"❌ append_metadata failed: {e}")
 
 # =====================================================
 # 🔁 /dataset/update_audio — Re-record existing row
@@ -73,7 +71,6 @@ def append_metadata(file_name: str, text: str):
 async def update_audio(file: UploadFile, file_name: str = Form(...)):
     """Replace an existing WAV with new recording (keeps metadata intact)."""
     try:
-        # Normalize path (strip wavs/ prefix if present)
         clean_name = os.path.basename(file_name)
         target_path = os.path.join(WAV_DIR, clean_name)
 
@@ -84,22 +81,22 @@ async def update_audio(file: UploadFile, file_name: str = Form(...)):
         if not contents:
             raise HTTPException(status_code=400, detail="Empty file upload")
 
-        # --- Decode ---
-        ct = file.content_type or ""
-        fmt = None
-        if "mp4" in ct or "aac" in ct:
-            fmt = "mp4"
-        elif "webm" in ct:
+        # --- Robust format detection ---
+        ct = (file.content_type or "").lower()
+        ext = os.path.splitext(file.filename or "")[1].lower()
+        fmt = "wav"
+        if "webm" in ct or ext == ".webm":
             fmt = "webm"
-        elif "ogg" in ct:
+        elif any(k in ct for k in ["mp4", "aac", "m4a"]) or ext in [".mp4", ".m4a", ".aac"]:
+            fmt = "mp4"
+        elif "ogg" in ct or ext == ".ogg":
             fmt = "ogg"
-        elif "wav" in ct:
-            fmt = "wav"
 
+        # --- Decode safely ---
         try:
             audio = AudioSegment.from_file(io.BytesIO(contents), format=fmt)
         except Exception as e:
-            print(f"⚠️ pydub decode failed ({e}); trying fallback...")
+            print(f"⚠️ pydub decode failed ({e}); trying soundfile fallback...")
             try:
                 data, sr = sf.read(io.BytesIO(contents), dtype="float32", always_2d=False)
                 raw = AudioSegment(
@@ -119,12 +116,11 @@ async def update_audio(file: UploadFile, file_name: str = Form(...)):
             format="wav",
             parameters=["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1"],
         )
-
         print(f"🔁 Re-record replaced → {target_path}")
         return {"status": "ok", "message": f"{clean_name} updated successfully"}
 
     except Exception as e:
-        print(f"❌ Failed to update audio: {e}")
+        print(f"❌ update_audio failed: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 # =====================================================
@@ -147,13 +143,12 @@ async def delete_sample(request: Request):
         clean_name = os.path.basename(file_name)
         target_wav = os.path.join(WAV_DIR, clean_name)
 
-        # --- Rewrite CSV without that row ---
+        # --- Rewrite CSV ---
         rows, found = [], False
         with open(CSV_PATH, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for r in reader:
-                existing_clean = os.path.basename(r["file_name"])
-                if existing_clean == clean_name:
+                if os.path.basename(r["file_name"]) == clean_name:
                     found = True
                     continue
                 rows.append(r)
@@ -168,12 +163,12 @@ async def delete_sample(request: Request):
 
         if os.path.exists(target_wav):
             os.remove(target_wav)
-            print(f"🗑️ Deleted file → {target_wav}")
+            print(f"🗑️ Deleted → {target_wav}")
 
         return {"status": "ok", "message": f"{clean_name} deleted"}
 
     except Exception as e:
-        print(f"❌ Delete failed: {e}")
+        print(f"❌ delete_sample failed: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 # =====================================================
@@ -184,7 +179,6 @@ async def list_samples():
     try:
         if not os.path.exists(CSV_PATH):
             return {"count": 0, "samples": []}
-
         with open(CSV_PATH, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             rows = [
@@ -194,7 +188,7 @@ async def list_samples():
             ]
         return {"count": len(rows), "samples": rows}
     except Exception as e:
-        print(f"❌ /dataset/list failed: {e}")
+        print(f"❌ list_samples failed: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 # =====================================================
@@ -209,16 +203,17 @@ async def export_dataset():
         tmp_dir = tempfile.gettempdir()
         zip_base = os.path.join(tmp_dir, "dataset_export")
         zip_path = f"{zip_base}.zip"
-
         if os.path.exists(zip_path):
             os.remove(zip_path)
 
         shutil.make_archive(zip_base, "zip", ARCHIVE_DIR)
         print(f"📦 Dataset exported → {zip_path}")
 
-        return FileResponse(zip_path,
-                            filename="MongolianWhisper_Dataset.zip",
-                            media_type="application/zip")
+        return FileResponse(
+            zip_path,
+            filename="MongolianWhisper_Dataset.zip",
+            media_type="application/zip"
+        )
     except Exception as e:
-        print(f"❌ Export failed: {e}")
+        print(f"❌ export_dataset failed: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
