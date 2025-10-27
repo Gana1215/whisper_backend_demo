@@ -1,9 +1,10 @@
 # ===============================================
-# 🎙️ dataset_routes.py (v4.2 — Stable Final)
+# 🎙️ dataset_routes.py (v4.3 — Stable Final + Normalized List)
 # ✅ Keep: text update supports text/new_text keys
 # ✅ Keep: re-record works for any row, preserves text
 # ✅ Keep: /dataset/add_empty creates placeholder "beep" record
-# ✅ New: /dataset/add restored for Transcribe "Save to DB"
+# ✅ Keep: /dataset/add restored for Transcribe "Save to DB"
+# ✅ New: /dataset/list normalizes file_name → "wavs/<basename>" (fix legacy rows)
 # ✅ Placeholder text: "Enter the text for voice recording"
 # ✅ No change to mobile/desktop audio format logic
 # ===============================================
@@ -42,7 +43,7 @@ if not os.path.exists(CSV_PATH):
 
 
 # =====================================================
-# ✳️ Helper: append metadata
+# ✳️ Helpers
 # =====================================================
 def append_metadata(file_name: str, text: str):
     rel_path = f"wavs/{os.path.basename(file_name)}"
@@ -52,10 +53,27 @@ def append_metadata(file_name: str, text: str):
         with open(CSV_PATH, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
-    if not any(r.get("file_name") == rel_path for r in rows):
+    if not any((r.get("file_name") or "") == rel_path for r in rows):
         with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow([rel_path, clean_text])
         print(f"🧾 Added → {rel_path} | text='{clean_text}'")
+
+def detect_format(content_type: str, filename: str):
+    ct = (content_type or "").lower()
+    ext = os.path.splitext(filename or "")[1].lower()
+    if "webm" in ct or ext == ".webm":
+        return "webm"
+    if any(k in ct for k in ["mp4", "m4a", "aac"]) or ext in [".mp4", ".m4a", ".aac"]:
+        return "mp4"
+    if "ogg" in ct or ext == ".ogg":
+        return "ogg"
+    return "wav"
+
+def normalize_rel_path(name: str) -> str:
+    """Return 'wavs/<basename>' for any incoming path variant."""
+    if not name:
+        return ""
+    return f"wavs/{os.path.basename(name)}"
 
 
 # =====================================================
@@ -103,16 +121,7 @@ async def add_sample(file: UploadFile = File(...), text: str = Form(...)):
         clean_name = f"usr001_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
         target_path = os.path.join(WAV_DIR, clean_name)
 
-        # Detect input format
-        ct = (file.content_type or "").lower()
-        ext = os.path.splitext(file.filename or "")[1].lower()
-        fmt = "wav"
-        if "webm" in ct or ext == ".webm":
-            fmt = "webm"
-        elif any(k in ct for k in ["mp4", "m4a", "aac"]) or ext in [".mp4", ".m4a", ".aac"]:
-            fmt = "mp4"
-        elif "ogg" in ct or ext == ".ogg":
-            fmt = "ogg"
+        fmt = detect_format(file.content_type, file.filename)
 
         # Decode
         tmp_path = tempfile.mktemp(suffix=f".{fmt}")
@@ -164,16 +173,7 @@ async def update_audio(file: UploadFile = File(...), file_name: str = Form(...))
         if not contents:
             raise HTTPException(status_code=400, detail="Empty file upload")
 
-        # Detect input format
-        ct = (file.content_type or "").lower()
-        ext = os.path.splitext(file.filename or "")[1].lower()
-        fmt = "wav"
-        if "webm" in ct or ext == ".webm":
-            fmt = "webm"
-        elif any(k in ct for k in ["mp4", "aac", "m4a"]) or ext in [".mp4", ".m4a", ".aac"]:
-            fmt = "mp4"
-        elif "ogg" in ct or ext == ".ogg":
-            fmt = "ogg"
+        fmt = detect_format(file.content_type, file.filename)
 
         # Decode
         tmp_path = tempfile.mktemp(suffix=f".{fmt}")
@@ -315,7 +315,7 @@ async def delete_sample(request: Request):
 
 
 # =====================================================
-# 🧾 /dataset/list
+# 🧾 /dataset/list  ← NORMALIZES ALL ROWS
 # =====================================================
 @router.get("/list")
 async def list_samples():
@@ -324,11 +324,19 @@ async def list_samples():
             return {"count": 0, "samples": []}
         with open(CSV_PATH, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            rows = [
-                {k.strip(): (v.strip() if isinstance(v, str) else v)
-                 for k, v in r.items() if k}
-                for r in reader
-            ]
+            rows = []
+            for r in reader:
+                # Normalize keys/values and ensure file_name → 'wavs/<basename>'
+                normalized = {}
+                for k, v in r.items():
+                    if not k:
+                        continue
+                    key = k.strip()
+                    val = v.strip() if isinstance(v, str) else v
+                    if key == "file_name":
+                        val = normalize_rel_path(val)
+                    normalized[key] = val
+                rows.append(normalized)
         return {"count": len(rows), "samples": rows}
     except Exception as e:
         print(f"❌ list_samples failed: {e}")
