@@ -1,9 +1,10 @@
 # ===============================================
-# 🎙️ dataset_routes.py (v4.1 — Stable Update + Add Empty)
-# ✅ Fix: text update supports both text/new_text keys
-# ✅ Fix: re-record works for any row, keeps text intact
-# ✅ New: /dataset/add_empty — creates placeholder "beep" record
-# ✅ Placeholder text improved → "Enter the text for voice recording"
+# 🎙️ dataset_routes.py (v4.2 — Stable Final)
+# ✅ Keep: text update supports text/new_text keys
+# ✅ Keep: re-record works for any row, preserves text
+# ✅ Keep: /dataset/add_empty creates placeholder "beep" record
+# ✅ New: /dataset/add restored for Transcribe "Save to DB"
+# ✅ Placeholder text: "Enter the text for voice recording"
 # ✅ No change to mobile/desktop audio format logic
 # ===============================================
 
@@ -34,6 +35,7 @@ WAV_DIR = os.path.join(ARCHIVE_DIR, "wavs")
 CSV_PATH = os.path.join(ARCHIVE_DIR, "metadata.csv")
 os.makedirs(WAV_DIR, exist_ok=True)
 
+# Ensure CSV header
 if not os.path.exists(CSV_PATH):
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(["file_name", "text"])
@@ -44,13 +46,13 @@ if not os.path.exists(CSV_PATH):
 # =====================================================
 def append_metadata(file_name: str, text: str):
     rel_path = f"wavs/{os.path.basename(file_name)}"
-    clean_text = text.strip() if text.strip() else "EMPTY_AUDIO"
+    clean_text = text.strip() if isinstance(text, str) and text.strip() else "EMPTY_AUDIO"
     rows = []
     if os.path.exists(CSV_PATH):
         with open(CSV_PATH, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
-    if not any(r["file_name"] == rel_path for r in rows):
+    if not any(r.get("file_name") == rel_path for r in rows):
         with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow([rel_path, clean_text])
         print(f"🧾 Added → {rel_path} | text='{clean_text}'")
@@ -69,7 +71,7 @@ async def add_empty():
         clean_name = f"usr001_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
         target_path = os.path.join(WAV_DIR, clean_name)
 
-        # Create 1-second sine beep at 440 Hz
+        # 1s sine beep @ 440 Hz → 44.1kHz mono 16-bit
         beep = generators.Sine(440).to_audio_segment(duration=1000)
         beep = beep.set_frame_rate(44100).set_channels(1).set_sample_width(2)
         beep.export(target_path, format="wav")
@@ -85,29 +87,34 @@ async def add_empty():
 
 
 # =====================================================
-# 🔁 /dataset/update_audio — Overwrite WAV safely
+# 🧩 /dataset/add — Save real audio + text (Transcribe tab)
 # =====================================================
-@router.post("/update_audio")
-async def update_audio(file: UploadFile = File(...), file_name: str = Form(...)):
+@router.post("/add")
+async def add_sample(file: UploadFile = File(...), text: str = Form(...)):
+    """
+    Save audio + text coming from the Transcribe tab.
+    Decodes mobile/desktop formats and exports 44.1kHz mono WAV.
+    """
     try:
-        clean_name = os.path.basename(file_name.replace("wavs/", ""))
-        target_path = os.path.join(WAV_DIR, clean_name)
-        rel_path = f"wavs/{clean_name}"
-
         contents = await file.read()
         if not contents:
             raise HTTPException(status_code=400, detail="Empty file upload")
 
+        clean_name = f"usr001_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+        target_path = os.path.join(WAV_DIR, clean_name)
+
+        # Detect input format
         ct = (file.content_type or "").lower()
         ext = os.path.splitext(file.filename or "")[1].lower()
         fmt = "wav"
         if "webm" in ct or ext == ".webm":
             fmt = "webm"
-        elif any(k in ct for k in ["mp4", "aac", "m4a"]) or ext in [".mp4", ".m4a", ".aac"]:
+        elif any(k in ct for k in ["mp4", "m4a", "aac"]) or ext in [".mp4", ".m4a", ".aac"]:
             fmt = "mp4"
         elif "ogg" in ct or ext == ".ogg":
             fmt = "ogg"
 
+        # Decode
         tmp_path = tempfile.mktemp(suffix=f".{fmt}")
         with open(tmp_path, "wb") as tmp:
             tmp.write(contents)
@@ -124,11 +131,74 @@ async def update_audio(file: UploadFile = File(...), file_name: str = Form(...))
         finally:
             os.remove(tmp_path)
 
+        # Export canonical WAV
+        audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
+        audio.export(target_path, format="wav")
+
+        append_metadata(clean_name, text)
+        print(f"💾 Saved from Transcribe → {target_path}")
+        return {"status": "ok", "file_name": clean_name, "text": text}
+    except Exception as e:
+        print(f"❌ add_sample failed: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# =====================================================
+# 🔁 /dataset/update_audio — Overwrite WAV safely
+# =====================================================
+@router.post("/update_audio")
+async def update_audio(file: UploadFile = File(...), file_name: str = Form(...)):
+    """
+    Overwrite an existing WAV by file name, keep existing text in CSV.
+    If the row is missing in CSV, it appends a new row with a default text.
+    """
+    try:
+        if not file_name:
+            raise HTTPException(status_code=400, detail="file_name missing")
+
+        clean_name = os.path.basename(file_name.replace("wavs/", ""))
+        target_path = os.path.join(WAV_DIR, clean_name)
+        rel_path = f"wavs/{clean_name}"
+
+        contents = await file.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty file upload")
+
+        # Detect input format
+        ct = (file.content_type or "").lower()
+        ext = os.path.splitext(file.filename or "")[1].lower()
+        fmt = "wav"
+        if "webm" in ct or ext == ".webm":
+            fmt = "webm"
+        elif any(k in ct for k in ["mp4", "aac", "m4a"]) or ext in [".mp4", ".m4a", ".aac"]:
+            fmt = "mp4"
+        elif "ogg" in ct or ext == ".ogg":
+            fmt = "ogg"
+
+        # Decode
+        tmp_path = tempfile.mktemp(suffix=f".{fmt}")
+        with open(tmp_path, "wb") as tmp:
+            tmp.write(contents)
+
+        try:
+            audio = AudioSegment.from_file(tmp_path, format=fmt)
+        except Exception as e:
+            print(f"⚠️ PyDub decode failed ({e}); using ffmpeg fallback...")
+            tmp_wav = tempfile.mktemp(suffix=".wav")
+            cmd = ["ffmpeg", "-y", "-i", tmp_path, "-ac", "1", "-ar", "44100", tmp_wav]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            audio = AudioSegment.from_file(tmp_wav, format="wav")
+            os.remove(tmp_wav)
+        finally:
+            os.remove(tmp_path)
+
+        # Export canonical WAV
         audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
         audio.export(target_path, format="wav")
         print(f"🎙️ Re-recorded → {target_path}")
 
-        # Keep text intact or add default if missing
+        # Ensure CSV row exists; keep text intact
+        placeholder_text = "EMPTY_AUDIO"
         rows, found = [], False
         if os.path.exists(CSV_PATH):
             with open(CSV_PATH, "r", encoding="utf-8") as f:
@@ -140,7 +210,7 @@ async def update_audio(file: UploadFile = File(...), file_name: str = Form(...))
                     rows.append(r)
         if not found:
             with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow([rel_path, "EMPTY_AUDIO"])
+                csv.writer(f).writerow([rel_path, placeholder_text])
 
         return {"status": "ok", "message": f"{clean_name} re-recorded successfully"}
     except Exception as e:
@@ -180,7 +250,7 @@ async def update_text(request: Request):
             for r in reader:
                 fn = (r.get("file_name") or "").strip()
                 if fn.endswith(clean_name) or os.path.basename(fn) == clean_name:
-                    r["text"] = text.strip()
+                    r["text"] = (text or "").strip()
                     updated = True
                 rows.append(r)
 
@@ -204,7 +274,7 @@ async def update_text(request: Request):
 @router.post("/delete")
 async def delete_sample(request: Request):
     try:
-        if request.headers.get("content-type", "").startswith("application/json"):
+        if (request.headers.get("content-type") or "").lower().startswith("application/json"):
             data = await request.json()
             file_name = data.get("file_name")
         else:
@@ -221,7 +291,7 @@ async def delete_sample(request: Request):
         with open(CSV_PATH, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for r in reader:
-                if os.path.basename(r["file_name"]) == clean_name:
+                if os.path.basename(r.get("file_name", "")) == clean_name:
                     found = True
                     continue
                 rows.append(r)
