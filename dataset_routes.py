@@ -346,19 +346,34 @@ async def list_samples():
 # =====================================================
 # 📦 /dataset/export
 # =====================================================
+# ================= PATCH: /dataset/export =================
 @router.get("/export")
 async def export_dataset():
     try:
         if not os.path.exists(CSV_PATH) or os.stat(CSV_PATH).st_size == 0:
             return JSONResponse(status_code=400, content={"error": "No dataset entries yet."})
+
+        # ✅ unique filename each time to defeat caches
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         tmp_dir = tempfile.gettempdir()
-        zip_base = os.path.join(tmp_dir, "dataset_export")
+        zip_base = os.path.join(tmp_dir, f"dataset_export_{ts}")
         zip_path = f"{zip_base}.zip"
-        if os.path.exists(zip_path):
-            os.remove(zip_path)
+
+        # build fresh archive of the whole dataset dir
         shutil.make_archive(zip_base, "zip", ARCHIVE_DIR)
-        print(f"📦 Dataset exported → {zip_path}")
-        return FileResponse(zip_path, filename="MongolianWhisper_Dataset.zip", media_type="application/zip")
+
+        # ✅ strong anti-cache headers + timestamped download name
+        resp = FileResponse(
+            zip_path,
+            filename=f"MongolianWhisper_Dataset_{ts}.zip",
+            media_type="application/zip",
+        )
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        resp.headers["X-Archive-Generated-At"] = ts
+        return resp
     except Exception as e:
         print(f"❌ export_dataset failed: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
+# ================= END PATCH =================
