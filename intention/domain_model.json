@@ -1,0 +1,60 @@
+{
+  "check_balance": {
+    "action": "voice_reply",
+    "reply_text": "Харилцагч таны үлдэгдэл:",
+    "static_voice_file": "tts/check_balance_phrase.wav",
+    "balance_amount": "tts/balance_amount.txt",
+    "pdf_url": null,
+    "force_static": false
+  },
+
+  "show_transactions": {
+    "action": "voice_reply",
+    "reply_text": "Таны сүүлийн гурван гүйлгээг мессежээр илгээв.",
+    "static_voice_file": "tts/transactions_reply.wav",
+    "pdf_url": null
+  },
+
+  "lost_card": {
+    "action": "voice_reply",
+    "reply_text": "Таны картыг хааж, шинээр захиалах хүсэлт илгээгдлээ.",
+    "static_voice_file": "tts/lost_card_reply.wav",
+    "pdf_url": "docs/lost_card_guide.pdf",
+    "force_static": true
+  },
+
+  "loan_info": {
+    "action": "file_reply",
+    "reply_text": "Таны зээлийн нөхцөлүүдийг файлаар явууллаа. Та танилцана уу.",
+    "static_voice_file": "tts/loan_reply.wav",
+    "pdf_url": "docs/loan_information.pdf"
+  },
+
+  "savings_info": {
+    "action": "file_reply",
+    "reply_text": "Таны хадгаламжийн хүүгийн мэдээлэл файлаар илгээгдлээ.",
+    "static_voice_file": "tts/savings_reply.wav",
+    "pdf_url": "docs/savings_interest_rates.pdf"
+  },
+
+  "exchange_rate": {
+    "action": "voice_reply",
+    "reply_text": "1 ам.доллар = 3,450",
+    "static_voice_file": "tts/exchange_reply.wav",
+    "pdf_url": null
+  },
+
+  "branch_hours": {
+    "action": "voice_reply",
+    "reply_text": "Манай салбарууд ажлын өдрүүдэд 09:00–18:00 цагт ажиллана.",
+    "static_voice_file": "tts/branch_hours_reply.wav",
+    "pdf_url": null
+  },
+
+  "contact_support": {
+    "action": "voice_reply",
+    "reply_text": "Та 1800-XXXX утсаар холбогдоно уу.",
+    "static_voice_file": "tts/contact_support_reply.wav",
+    "pdf_url": null
+  }
+}
