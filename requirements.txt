@@ -12,7 +12,7 @@ fastapi==0.115.0
 uvicorn==0.38.0
 python-multipart==0.0.20
 aiofiles==24.1.0
-
+requests
 # --- Whisper Runtime (CTranslate2 backend) ---
 faster-whisper==1.2.0
 ctranslate2==4.6.0
