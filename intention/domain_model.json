@@ -39,7 +39,7 @@
 
   "exchange_rate": {
     "action": "voice_reply",
-    "reply_text": "1 ам.доллар = 3,450",
+    "reply_text": "1 ам.доллар = 3,450 төгрөг байна.",
     "static_voice_file": "tts/exchange_reply.wav",
     "pdf_url": null
   },
@@ -56,5 +56,13 @@
     "reply_text": "Та 1800-XXXX утсаар холбогдоно уу.",
     "static_voice_file": "tts/contact_support_reply.wav",
     "pdf_url": null
+  },
+
+  "transfer_money": {
+    "action": "voice_reply",
+    "reply_text": "Мөнгөн шилжүүлэг амжилттай хийгдлээ.",
+    "static_voice_file": "tts/transfer_success.wav",
+    "pdf_url": "docs/transfer_receipt.pdf",
+    "force_static": true
   }
 }
