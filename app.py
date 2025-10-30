@@ -1,12 +1,13 @@
 # ===============================================
-# 🎙️ Mongolian Whisper API (FastAPI + Faster-Whisper)
-# ✅ Fixed: /dataset routes now fully mounted (DB save + edit text work)
-# ✅ Handles iOS/Android/Desktop formats (mp4, m4a, aac, webm, wav)
-# ✅ Unified with dataset_routes v3.6+
-# ✅ Render + local tested, mobile-safe
+# 🎙️ Mongolian Whisper API — Phase 2 (Final Unified)
+# ---------------------------------------------------
+# ✅ Faster-Whisper + Intent module (Phase 1 + 2 unified)
+# ✅ Mounts: /dataset + /intent + static/tts
+# ✅ Hugging Face model direct load (no utils/transcriber)
+# ✅ Works with iOS/Android/Desktop frontends
 # ===============================================
 
-import os, tempfile, psutil, logging, time, io, sys
+import os, tempfile, psutil, logging, time, sys
 from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
@@ -17,7 +18,7 @@ from faster_whisper import WhisperModel
 from pydub import AudioSegment
 import soundfile as sf
 
-# -------- Load and verify environment --------
+# -------- Load environment --------
 if not load_dotenv():
     print("⚠️  .env not found — using system environment variables")
 
@@ -28,19 +29,18 @@ if missing:
     if not os.path.exists("/opt/render"):
         sys.exit(1)
 
-# -------- Environment detection --------
+# -------- Environment setup --------
 IS_RENDER = os.path.exists("/opt/render")
 BASE_DIR = "/opt/render/project/src" if IS_RENDER else os.getcwd()
 os.chdir(BASE_DIR)
 
-# -------- Config --------
 HF_MODEL = os.getenv("HF_MODEL", "gana1215/MN_Whisper_Small_CT2")
 DEVICE = os.getenv("DEVICE", "cpu")
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")
+DATA_DIR = os.getenv("DATA_DIR", os.path.join(BASE_DIR, "local_persistent/record_archive"))
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))
 MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))
 DIAG = os.getenv("DIAG", "0") == "1"
-DATA_DIR = os.getenv("DATA_DIR", os.path.join(BASE_DIR, "local_persistent/record_archive"))
 
 print("✅ Environment configuration loaded:")
 print(f"   HF_MODEL        → {HF_MODEL}")
@@ -48,10 +48,14 @@ print(f"   DEVICE          → {DEVICE}")
 print(f"   COMPUTE_TYPE    → {COMPUTE_TYPE}")
 print(f"   DATA_DIR        → {DATA_DIR}")
 
-# --- Storage folders ---
+# -------- Directories --------
 ARCHIVE_DIR = DATA_DIR if os.path.exists(DATA_DIR) else os.path.join(BASE_DIR, "local_persistent/record_archive")
 ARCHIVE_WAV_DIR = os.path.join(ARCHIVE_DIR, "wavs")
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+TTS_DIR = os.path.join(STATIC_DIR, "tts")
 os.makedirs(ARCHIVE_WAV_DIR, exist_ok=True)
+os.makedirs(TTS_DIR, exist_ok=True)
+
 print(f"📦 Dataset directory in use → {ARCHIVE_DIR}")
 
 # -------- Logging --------
@@ -70,7 +74,7 @@ def log_memory(label=""):
         logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
 
 # -------- FastAPI setup --------
-app = FastAPI(title="Mongolian Whisper API", version="2.1.0")
+app = FastAPI(title="Mongolian Whisper API", version="2.2.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -79,18 +83,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---- Include dataset routes (explicit mount, visible log) ----
+# -------- Include routes --------
 try:
     from dataset_routes import router as dataset_router
     app.include_router(dataset_router)
     print("✅ Mounted /dataset routes successfully")
 except Exception as e:
-    print(f"❌ dataset_routes import failed: {e}")
+    print(f"⚠️ dataset_routes import failed: {e}")
 
-# ---- Static mount for playback ----
+# ✅ Added for Phase 2 (Dual-Voice Intention Router)
+try:
+    from intention.intent_router import router as intent_router
+    app.include_router(intent_router, prefix="/intent")
+    print("✅ Mounted /intent routes successfully (Dual Voice Phase 2)")
+except Exception as e:
+    print(f"⚠️ intention router not mounted ({e})")
+
+# -------- Static mounts --------
 app.mount("/record_archive", StaticFiles(directory=ARCHIVE_DIR), name="record_archive")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# -------- Model --------
+# -------- Whisper model --------
 model: Optional[WhisperModel] = None
 
 @app.on_event("startup")
@@ -124,6 +137,7 @@ def health():
         "device": DEVICE,
         "compute_type": COMPUTE_TYPE,
         "archive_dir": ARCHIVE_DIR,
+        "intent_module": os.path.exists(os.path.join(BASE_DIR, "intention")),
     }
 
 # -------- Response schema --------
@@ -134,7 +148,7 @@ class TranscribeResult(BaseModel):
     time_ms: Optional[float] = None
     playback_path: Optional[str] = None
 
-# -------- Main inference endpoint --------
+# -------- Main inference --------
 @app.post("/transcribe", response_model=TranscribeResult)
 async def transcribe(request: Request, file: UploadFile = File(...), device: Optional[str] = Form(None)):
     if model is None:
@@ -149,20 +163,13 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File too large.")
 
-    # --- Decode (multi-format, mobile-safe) ---
-    dur = None
+    # --- Decode audio (multi-format safe) ---
     try:
         fmt = "wav"
         ext = os.path.splitext(file.filename or "")[1].lower()
-
-        if "webm" in ct or ext == ".webm":
-            fmt = "webm"
-        elif any(k in ct for k in ["mp4", "m4a", "aac"]) or ext in [".mp4", ".m4a", ".aac"]:
-            fmt = "mp4"
-        elif "ogg" in ct or ext == ".ogg":
-            fmt = "ogg"
-        elif "wav" in ct or ext == ".wav":
-            fmt = "wav"
+        if "webm" in ct or ext == ".webm": fmt = "webm"
+        elif "mp4" in ct or "m4a" in ct or ext in [".mp4", ".m4a", ".aac"]: fmt = "mp4"
+        elif "ogg" in ct or ext == ".ogg": fmt = "ogg"
 
         tmp_decode = tempfile.mktemp(suffix=f".{fmt}")
         with open(tmp_decode, "wb") as tmp:
@@ -171,38 +178,30 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
         try:
             audio = AudioSegment.from_file(tmp_decode, format=fmt)
         except Exception as e:
-            logging.warning(f"⚠️ pydub decode failed ({e}); trying fallback...")
-            try:
-                data, sr = sf.read(tmp_decode, dtype="float32", always_2d=False)
-                raw = AudioSegment(
-                    data.tobytes(),
-                    frame_rate=sr,
-                    sample_width=4,
-                    channels=1 if len(getattr(data, 'shape', [])) == 1 else data.shape[1],
-                )
-                audio = raw
-            except Exception as e2:
-                logging.error(f"❌ Fallback decode failed: {e2}")
-                os.remove(tmp_decode)
-                raise HTTPException(status_code=400, detail=f"Unsupported audio format ({e2})")
+            dlog(f"⚠️ pydub decode failed ({e}); trying fallback...")
+            data, sr = sf.read(tmp_decode, dtype="float32", always_2d=False)
+            audio = AudioSegment(
+                data.tobytes(),
+                frame_rate=sr,
+                sample_width=4,
+                channels=1 if len(getattr(data, 'shape', [])) == 1 else data.shape[1],
+            )
+        finally:
+            os.remove(tmp_decode)
 
-        os.remove(tmp_decode)
         audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
         dur = len(audio) / 1000.0
         if dur > MAX_DURATION_SEC:
             raise HTTPException(status_code=413, detail=f"Audio too long ({dur:.1f}s).")
 
-        dlog(f"🎧 Decoded {ct} (fmt={fmt}) → {dur:.2f}s")
-
+        dlog(f"🎧 Decoded ({fmt}) → {dur:.2f}s")
     except Exception as e:
-        logging.error(f"❌ Decode failed ({ct}): {e}")
-        raise HTTPException(status_code=400, detail=f"Unsupported audio format ({e})")
+        raise HTTPException(status_code=400, detail=f"Audio decode failed: {e}")
 
     # --- Export WAV for inference ---
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
         audio.export(tmp_wav.name, format="wav")
         tmp_wav_path = tmp_wav.name
-    dlog(f"🧩 Created temp WAV for inference → {tmp_wav_path}")
 
     # --- Inference ---
     try:
@@ -227,13 +226,12 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
             language=getattr(info, "language", "mn"),
             duration_sec=dur,
             time_ms=elapsed_ms,
-            playback_path=None
+            playback_path=None,
         )
     finally:
-        for p in [tmp_wav_path]:
-            if os.path.exists(p):
-                os.remove(p)
-                dlog(f"🧹 Temp removed: {p}")
+        if os.path.exists(tmp_wav_path):
+            os.remove(tmp_wav_path)
+            dlog(f"🧹 Temp removed: {tmp_wav_path}")
 
 # -------- Entrypoint --------
 if __name__ == "__main__":

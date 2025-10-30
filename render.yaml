@@ -1,6 +1,6 @@
 # ===============================================
 # 🎙️ Mongolian Whisper Backend — Render Config
-# Version: v1.9 (Persistent Dataset Edition)
+# Version: v2.0 (Persistent Dataset + Intention Archive)
 # ===============================================
 
 services:
@@ -28,14 +28,21 @@ services:
       - key: DIAG
         value: "1"
 
-      # 🧱 Persistent data path (used by app.py)
+      # 🧱 Phase 1 dataset path (used by app.py)
+      #    Point it inside the mounted persistent folder
       - key: DATA_DIR
-        value: /data/record_archive
+        value: /opt/render/project/src/local_persistent/record_archive
 
-    # 💾 Persistent disk (1 GB, can increase later)
+      # (Optional but useful)
+      - key: MAX_UPLOAD_BYTES
+        value: "10485760"   # 10 MB
+      - key: MAX_DURATION_SEC
+        value: "30"         # 30 seconds
+
+    # 💾 Persistent disk (stores BOTH Phase 1 and Phase 2 archives)
     disk:
       name: whisper_dataset_storage
-      mountPath: /data
+      mountPath: /opt/render/project/src/local_persistent
       sizeGB: 1
 
     # 🩺 Health check — ensures API is responsive
