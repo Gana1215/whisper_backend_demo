@@ -18,6 +18,12 @@ from faster_whisper import WhisperModel
 from pydub import AudioSegment
 import soundfile as sf
 
+# 🔧 --- Ensure correct import path on Render ---
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+print(f"🧠 Python import path fixed: {PROJECT_ROOT}")
+
 # -------- Load environment --------
 if not load_dotenv():
     print("⚠️  .env not found — using system environment variables")
