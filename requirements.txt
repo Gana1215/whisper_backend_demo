@@ -14,7 +14,7 @@ python-multipart==0.0.20
 aiofiles==24.1.0
 requests
 joblib
-
+scikit-learn
 # --- Whisper Runtime (CTranslate2 backend) ---
 faster-whisper==1.2.0
 ctranslate2==4.6.0
