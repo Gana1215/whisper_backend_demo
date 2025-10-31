@@ -1,15 +1,12 @@
 # ===============================================
-# 🎙️ dataset_routes.py (v4.3 — Stable Final + Normalized List)
-# ✅ Keep: text update supports text/new_text keys
-# ✅ Keep: re-record works for any row, preserves text
-# ✅ Keep: /dataset/add_empty creates placeholder "beep" record
-# ✅ Keep: /dataset/add restored for Transcribe "Save to DB"
-# ✅ New: /dataset/list normalizes file_name → "wavs/<basename>" (fix legacy rows)
-# ✅ Placeholder text: "Enter the text for voice recording"
-# ✅ No change to mobile/desktop audio format logic
+# 🎙️ dataset_routes.py (v4.4 — Unified Export Edition)
+# ✅ Based on v4.3 Stable Final (Locked)
+# ✅ Phase 1 untouched (record_archive handling)
+# ✅ Adds Phase 2 (intention_archive) to export ZIP
+# ✅ Safe for Render + Local environments
 # ===============================================
 
-import os, csv, datetime, shutil, tempfile, subprocess
+import os, csv, datetime, shutil, tempfile, subprocess, zipfile
 from fastapi import APIRouter, UploadFile, Form, Request, HTTPException, File
 from fastapi.responses import JSONResponse, FileResponse
 from pydub import AudioSegment, generators
@@ -326,7 +323,6 @@ async def list_samples():
             reader = csv.DictReader(f)
             rows = []
             for r in reader:
-                # Normalize keys/values and ensure file_name → 'wavs/<basename>'
                 normalized = {}
                 for k, v in r.items():
                     if not k:
@@ -344,36 +340,58 @@ async def list_samples():
 
 
 # =====================================================
-# 📦 /dataset/export
+# 📦 /dataset/export — Unified Phase 1 + Phase 2 Archive
 # =====================================================
-# ================= PATCH: /dataset/export =================
 @router.get("/export")
 async def export_dataset():
+    """
+    Export Phase 1 (record_archive) together with Phase 2 (intention_archive)
+    into a single ZIP archive for unified dataset backup.
+    """
     try:
         if not os.path.exists(CSV_PATH) or os.stat(CSV_PATH).st_size == 0:
             return JSONResponse(status_code=400, content={"error": "No dataset entries yet."})
 
-        # ✅ unique filename each time to defeat caches
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         tmp_dir = tempfile.gettempdir()
-        zip_base = os.path.join(tmp_dir, f"dataset_export_{ts}")
-        zip_path = f"{zip_base}.zip"
+        zip_path = os.path.join(tmp_dir, f"MongolianWhisper_FullDataset_{ts}.zip")
 
-        # build fresh archive of the whole dataset dir
-        shutil.make_archive(zip_base, "zip", ARCHIVE_DIR)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+            # --- Phase 1: Speech Dataset ---
+            for root, _, files in os.walk(ARCHIVE_DIR):
+                for f in files:
+                    full = os.path.join(root, f)
+                    rel = os.path.relpath(full, os.path.dirname(ARCHIVE_DIR))
+                    zipf.write(full, rel)
 
-        # ✅ strong anti-cache headers + timestamped download name
+            # --- Phase 2: Intention Dataset ---
+            BASE_DIR = os.getcwd()
+            INTENT_ARCHIVE = os.path.join(BASE_DIR, "local_persistent", "intention_archive")
+            meta2 = os.path.join(INTENT_ARCHIVE, "metadata.csv")
+            wavs2 = os.path.join(INTENT_ARCHIVE, "wavs")
+
+            if os.path.exists(meta2):
+                zipf.write(meta2, "intention_archive/metadata.csv")
+                print("📦 Added Phase 2 metadata.csv")
+
+            if os.path.exists(wavs2):
+                for f in os.listdir(wavs2):
+                    if f.lower().endswith(".wav"):
+                        zipf.write(os.path.join(wavs2, f), f"intention_archive/wavs/{f}")
+                print("📦 Added Phase 2 WAV files")
+
         resp = FileResponse(
             zip_path,
-            filename=f"MongolianWhisper_Dataset_{ts}.zip",
+            filename=f"MongolianWhisper_FullDataset_{ts}.zip",
             media_type="application/zip",
         )
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
         resp.headers["X-Archive-Generated-At"] = ts
+        print(f"✅ Exported unified dataset → {zip_path}")
         return resp
+
     except Exception as e:
         print(f"❌ export_dataset failed: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
-# ================= END PATCH =================
