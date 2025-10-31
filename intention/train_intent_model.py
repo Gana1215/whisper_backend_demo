@@ -52,6 +52,10 @@ SEED_ROWS = [
     ("Данс руу мөнгө явуул", "transfer_money"),
     ("Өөрийн данснаас шилжүүлэх", "transfer_money"),
     ("Амгалангийн данс руу 200 мянга", "transfer_money"),
+    ("Гүйлгээ хийе", "transfer_money"),
+    ("Шилжүүлэг хийе", "transfer_money"),
+    ("Мөнгөн шилжүүлэг хийнээ", "transfer_money"),
+    
 
     # open_account
     ("Шинэ данс нээх хүсэлтэй байна", "open_account"),
