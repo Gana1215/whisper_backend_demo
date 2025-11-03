@@ -1,44 +1,11 @@
 text,intent
-# Placeholder dataset for Mongolian banking intents
-Би дансныхаа үлдэгдлийг шалгамаар байна,check_balance
-Үлдэгдэл хэд байгаа вэ,check_balance
-Дансны баланс харуул,check_balance
-Үлдэгдлээ хэлээд өгөөч,check_balance
-Дансны үлдэгдэл сонирхож байна,check_balance
-Гүйлгээний жагсаалт,show_transactions
-Сүүлийн гүйлгээнүүдийг харуул,show_transactions
-Өнөөдрийн гүйлгээг үзье,show_transactions
-Дансны хуулга хэрэгтэй байна,show_transactions
-Гүйлгээгээ хармаар байна,show_transactions
-Карт маань алга боллоо,lost_card
-Картаа гээчихлээ,lost_card
-Картаа хаячихлаа,lost_card
-Карт олдохгүй байна,lost_card
-Карт блоклоорой,lost_card
-Карт асуудалтай байна,lost_card
-100 мянгыг найз руу шилжүүл,transfer_money
-50000 төгрөг шилжүүлээрэй,transfer_money
-Данс руу мөнгө явуул,transfer_money
-Гүйлгээ хийе, transfer_money
-Шилжүүлгэ хийе,transfer_money
-Мөнгө шилжүүлье,transfer_money
-Хуулгаа гаргаад өгөөч, show_transactions
-Салбарын цагийн хуваар, branch_hours
-Өөрийн данснаас шилжүүлэх,transfer_money
-Амгалангийн данс руу 200 мянга,transfer_money
-Шинэ данс нээх хүсэлтэй байна,open_account
-Хадгаламжийн данс нээе,open_account
-Данс нээхэд яах вэ,open_account
-Хүүхдийн хадгаламж нээх,open_account
-Шинэ данс нээмээр байна,open_account
-За шинэ данс нээлгэе,open_account
-Данс нээлгэе,open_account
-Данс нээгээд өгөөч,open_account
-Валютын ханш хэд вэ,exchange_rate
-Нэг доллар хэд вэ,exchange_rate
-USD ханш хэлээд өг,exchange_rate
-Евро ханш хэд байна,exchange_rate
-Юанийн ханш,exchange_rate
+Салбарын байршил,branch_location
+Салбаруудын байршил,branch_location
+Салбарууд хаа хаа байна,branch_location
+Салбарууд хаана хаана байна,branch_location
+Төв салбар хаана вэ,branch_location
+Хотын салбар хаана вэ,branch_location
+Салбарын цагийн хуваар,branch_hours
 Салбар хэдэн цагт ажилладаг вэ,branch_hours
 Ажлын цаг хэд вэ,branch_hours
 Амралтын өдөр нээх үү,branch_hours
@@ -47,31 +14,64 @@ USD ханш хэлээд өг,exchange_rate
 Тусламж хэрэгтэй байна,contact_support
 Оператортой холбож өг,contact_support
 Харилцагчийн үйлчилгээтэй ярих,contact_support
-"Асуудал гарлаа, туслаач",contact_support
+Асуудал гарлаа туслаач,contact_support
 Дугаар нь хэд вэ тусламжийн,contact_support
-"Танай банкны зээл, зээлийн хүү",loan_info
+Дансны мэдээллээ шалгах,customer_info
+Клиентийн мэдээлэлээ шинэчлэх,customer_info
+Дансны төрөл шимтгэлийн талаар,customer_info
+Клиент бүртгэлийн тухай,customer_info
+Данс холбох заавар,customer_info
+Би дансныхаа үлдэгдлийг шалгамаар байна,check_balance
+Үлдэгдэл хэд байгаа вэ,check_balance
+Дансны баланс харуул,check_balance
+Үлдэгдлээ хэлээд өгөөч,check_balance
+Дансны үлдэгдэл сонирхож байна,check_balance
+Үлдэгдлээ харья,check_balance
+Үлдэгдэл хэд байна,check_balance
+Танай банкны зээл зээлийн хүү,loan_info
 Зээл авахад бүрдүүлэх материал,loan_info
 Ипотекийн зээлийн нөхцөл,loan_info
 Хүний зээлийн хүү хэд вэ,loan_info
 Зээлийн шугамын мэдээлэл,loan_info
+Карт маань алга боллоо,lost_card
+Картаа гээчихлээ,lost_card
+Картаа хаячихлаа,lost_card
+Карт олдохгүй байна,lost_card
+Карт блоклоорой,lost_card
+Карт асуудалтай байна,lost_card
+Шинэ данс нээх хүсэлтэй байна,open_account
+Хадгаламжийн данс нээе,open_account
+Данс нээхэд яах вэ,open_account
+Хүүхдийн хадгаламж нээх,open_account
+Шинэ данс нээмээр байна,open_account
+За шинэ данс нээлгэе,open_account
+Данс нээлгэе,open_account
+Данс нээгээд өгөөч,open_account
+Хадгаламжийн данс нээгээд өгөөч,open_account
 Хадгаламжийн хүү хэд вэ,savings_info
 Хадгаламж нээхэд хамгийн бага дүн,savings_info
 Хугацаат хадгаламжийн нөхцөл,savings_info
 Хүүхдийн хадгаламжийн мэдээлэл,savings_info
 Хадгаламжийн төрөл хэлээд өг,savings_info
-Дансны мэдээллээ шалгах,customer_info
-Клиентийн мэдээлэлээ шинэчлэх,customer_info
-"Дансны төрөл, шимтгэлийн талаар",customer_info
-Клиент бүртгэлийн тухай,customer_info
-Данс холбох заавар,customer_info
-Хадгаламжийн данс нээгээд өгөөч,open_account
+Гүйлгээний жагсаалт,show_transactions
+Сүүлийн гүйлгээнүүдийг харуул,show_transactions
+Өнөөдрийн гүйлгээг үзье,show_transactions
+Дансны хуулга хэрэгтэй байна,show_transactions
+Гүйлгээгээ хармаар байна,show_transactions
+Хуулгаа гаргаад өгөөч,show_transactions
+Валютын ханш хэд вэ,exchange_rate
+Нэг доллар хэд вэ,exchange_rate
+USD ханш хэлээд өг,exchange_rate
+Евро ханш хэд байна,exchange_rate
+Юанийн ханш,exchange_rate
+100 мянгыг найз руу шилжүүл,transfer_money
+50000 төгрөг шилжүүлээрэй,transfer_money
+Данс руу мөнгө явуул,transfer_money
+Гүйлгээ хийе,transfer_money
+Шилжүүлгэ хийе,transfer_money
+Мөнгө шилжүүлье,transfer_money
+Өөрийн данснаас шилжүүлэх,transfer_money
+Амгалангийн данс руу 200 мянга,transfer_money
 Эмээ банкин дээр ирлээ,transfer_money
 Тэр өвөө банкин дээр тэтгэвэрээ авахаар ирлээ,transfer_money
 Тэтгэвэр авах,transfer_money
-Салбарын байршил, branch_location
-Салбаруудын байршил, branch_location
-Салбаруудын байршил, branch_location
-Салбарууд хаа хаа байна, branch_location
-Салбарууд хаана хаана байна, branch_location
-Төв салбар хаана вэ, branch_location
-Хотын салбар хаана вэ,branch_location
