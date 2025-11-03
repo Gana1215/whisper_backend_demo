@@ -12,12 +12,18 @@ text,intent
 Гүйлгээгээ хармаар байна,show_transactions
 Карт маань алга боллоо,lost_card
 Картаа гээчихлээ,lost_card
+Картаа хаячихлаа,lost_card
 Карт олдохгүй байна,lost_card
 Карт блоклоорой,lost_card
 Карт асуудалтай байна,lost_card
 100 мянгыг найз руу шилжүүл,transfer_money
 50000 төгрөг шилжүүлээрэй,transfer_money
 Данс руу мөнгө явуул,transfer_money
+Гүйлгээ хийе, transfer_money
+Шилжүүлгэ хийе,transfer_money
+Мөнгө шилжүүлье,transfer_money
+Хуулгаа гаргаад өгөөч, show_transactions
+Салбарын цагийн хуваар, branch_hours
 Өөрийн данснаас шилжүүлэх,transfer_money
 Амгалангийн данс руу 200 мянга,transfer_money
 Шинэ данс нээх хүсэлтэй байна,open_account
@@ -25,6 +31,7 @@ text,intent
 Данс нээхэд яах вэ,open_account
 Хүүхдийн хадгаламж нээх,open_account
 Шинэ данс нээмээр байна,open_account
+Данс нээгээд өгөөч,open_account
 Валютын ханш хэд вэ,exchange_rate
 Нэг доллар хэд вэ,exchange_rate
 USD ханш хэлээд өг,exchange_rate
@@ -55,3 +62,7 @@ USD ханш хэлээд өг,exchange_rate
 "Дансны төрөл, шимтгэлийн талаар",customer_info
 Клиент бүртгэлийн тухай,customer_info
 Данс холбох заавар,customer_info
+Хадгаламжийн данс нээгээд өгөөч,open_account
+Эмээ банкин дээр ирлээ,transfer_money
+Тэр өвөө банкин дээр тэтгэвэрээ авахаар ирлээ,transfer_money
+Тэтгэвэр авах,transfer_money

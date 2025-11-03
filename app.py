@@ -81,13 +81,21 @@ def log_memory(label=""):
 
 # -------- FastAPI setup --------
 app = FastAPI(title="Mongolian Whisper API", version="2.2.1")
+# ✅ Strict CORS for Browser Downloads (Phase-2 fix)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://whisper-frontend-dhx3.onrender.com",  # Frontend on Render
+        "http://localhost:5173",                       # Local dev
+        "http://127.0.0.1:5173",
+        "https://4f96af32fcaa.ngrok-free.app",         # Optional tunnel
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],            # <-- lets browser see filename
 )
+
 
 # -------- Include routes --------
 try:

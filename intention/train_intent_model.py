@@ -1,9 +1,8 @@
-# intention/train_intent_model.py
 # ============================================
-# 🧠 Train baseline intent model (TF-IDF + LogisticRegression)
-# - Reads intention/intents.csv  (text,intent)
-# - Trains & evaluates
-# - Saves tfidf_vectorizer.pkl and intent_classifier.pkl
+# 🧠 train_intent_model.py (v2.4 — Safe Stratify + Normalized Labels)
+# ✅ Fixes: leading/trailing spaces & uppercase in intents
+# ✅ Safe fallback for small classes (avoids ValueError)
+# ✅ Keeps existing seed data and joblib save logic
 # ============================================
 
 import os, csv, sys, json, joblib, random
@@ -14,7 +13,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score, classification_report
 
-ROOT = Path(__file__).resolve().parents[1]           # project root
+ROOT = Path(__file__).resolve().parents[1]
 INTENT_DIR = ROOT / "intention"
 CSV_PATH = INTENT_DIR / "intents.csv"
 VEC_PATH = INTENT_DIR / "tfidf_vectorizer.pkl"
@@ -23,7 +22,7 @@ CLF_PATH = INTENT_DIR / "intent_classifier.pkl"
 SEED = 42
 random.seed(SEED)
 
-# --- 1) seed data if csv missing or basically empty ---
+# --- 1️⃣ seed data if csv missing or too small ---
 SEED_ROWS = [
     # check_balance
     ("Би дансныхаа үлдэгдлийг шалгамаар байна", "check_balance"),
@@ -55,7 +54,7 @@ SEED_ROWS = [
     ("Гүйлгээ хийе", "transfer_money"),
     ("Шилжүүлэг хийе", "transfer_money"),
     ("Мөнгөн шилжүүлэг хийнээ", "transfer_money"),
-    
+    ("Тэтгэвэр авах", "transfer_money"),
 
     # open_account
     ("Шинэ данс нээх хүсэлтэй байна", "open_account"),
@@ -85,21 +84,21 @@ SEED_ROWS = [
     ("Асуудал гарлаа, туслаач", "contact_support"),
     ("Дугаар нь хэд вэ тусламжийн", "contact_support"),
 
-    # loan_info (doc intent)
+    # loan_info
     ("Танай банкны зээл, зээлийн хүү", "loan_info"),
     ("Зээл авахад бүрдүүлэх материал", "loan_info"),
     ("Ипотекийн зээлийн нөхцөл", "loan_info"),
     ("Хүний зээлийн хүү хэд вэ", "loan_info"),
     ("Зээлийн шугамын мэдээлэл", "loan_info"),
 
-    # savings_info (doc intent)
+    # savings_info
     ("Хадгаламжийн хүү хэд вэ", "savings_info"),
     ("Хадгаламж нээхэд хамгийн бага дүн", "savings_info"),
     ("Хугацаат хадгаламжийн нөхцөл", "savings_info"),
     ("Хүүхдийн хадгаламжийн мэдээлэл", "savings_info"),
     ("Хадгаламжийн төрөл хэлээд өг", "savings_info"),
 
-    # customer_info (doc intent)
+    # customer_info
     ("Дансны мэдээллээ шалгах", "customer_info"),
     ("Клиентийн мэдээлэлээ шинэчлэх", "customer_info"),
     ("Дансны төрөл, шимтгэлийн талаар", "customer_info"),
@@ -114,60 +113,63 @@ def ensure_csv():
             w = csv.writer(f)
             w.writerow(["text", "intent"])
             w.writerows(SEED_ROWS)
-        print(f"⚠️  {CSV_PATH} not found → created seed dataset with {len(SEED_ROWS)} rows.")
+        print(f"⚠️  {CSV_PATH} not found → created seed dataset ({len(SEED_ROWS)} rows).")
         return
 
-    # if exists but has only header or very few rows → seed append
     df = pd.read_csv(CSV_PATH)
-    if len(df) < 16:  # arbitrarily small
+    if len(df) < 16:
         with open(CSV_PATH, "a", encoding="utf-8", newline="") as f:
-            w = csv.writer(f)
-            w.writerows(SEED_ROWS)
+            csv.writer(f).writerows(SEED_ROWS)
         print(f"⚠️  {CSV_PATH} had few rows → appended seed samples ({len(SEED_ROWS)}).")
 
-# --- 2) load data ---
+# --- 2️⃣ load & normalize ---
 ensure_csv()
 df = pd.read_csv(CSV_PATH).dropna()
+df["intent"] = df["intent"].astype(str).str.strip().str.lower()  # normalize labels
 df = df.sample(frac=1.0, random_state=SEED).reset_index(drop=True)
 
-# Basic sanity
-if not {"text","intent"}.issubset(df.columns):
+if not {"text", "intent"}.issubset(df.columns):
     print("❌ intents.csv must have columns: text,intent")
     sys.exit(1)
 
-print(f"📄 Dataset size: {len(df)}  |  Intents: {sorted(df['intent'].unique().tolist())}")
+unique_intents = sorted(df["intent"].unique().tolist())
+print(f"📄 Dataset size: {len(df)}  |  Intents: {unique_intents}")
 
-# --- 3) split ---
-X_train, X_test, y_train, y_test = train_test_split(
-    df["text"], df["intent"], test_size=0.2, random_state=SEED, stratify=df["intent"]
-)
+# --- 3️⃣ split (safe stratify) ---
+try:
+    X_train, X_test, y_train, y_test = train_test_split(
+        df["text"], df["intent"], test_size=0.2, random_state=SEED, stratify=df["intent"]
+    )
+except ValueError:
+    print("⚠️ Some intents too rare for stratify → using random split instead.")
+    X_train, X_test, y_train, y_test = train_test_split(
+        df["text"], df["intent"], test_size=0.2, random_state=SEED
+    )
 
-# --- 4) vectorizer & model ---
-# Word TF-IDF with uni/bi-grams works well for Mongolian; Unicode tokenization is OK.
+# --- 4️⃣ vectorizer & model ---
 vectorizer = TfidfVectorizer(
     max_features=4000,
     ngram_range=(1, 2),
     lowercase=True,
     strip_accents=None
 )
-
 Xtr = vectorizer.fit_transform(X_train)
 Xte = vectorizer.transform(X_test)
 
-clf = LogisticRegression(max_iter=2000, n_jobs=None, class_weight="balanced")
+clf = LogisticRegression(max_iter=2000, class_weight="balanced")
 clf.fit(Xtr, y_train)
 
-# --- 5) eval ---
+# --- 5️⃣ eval ---
 pred = clf.predict(Xte)
 acc = accuracy_score(y_test, pred)
 f1  = f1_score(y_test, pred, average="macro")
-print("\n✅ Evaluation")
 
+print("\n✅ Evaluation")
 print(f"Accuracy: {acc:.4f} | Macro-F1: {f1:.4f}")
 print("\nPer-class report:")
 print(classification_report(y_test, pred, digits=4))
 
-# --- 6) save ---
+# --- 6️⃣ save ---
 INTENT_DIR.mkdir(parents=True, exist_ok=True)
 joblib.dump(vectorizer, VEC_PATH)
 joblib.dump(clf, CLF_PATH)
