@@ -50,7 +50,12 @@
     "static_voice_file": "tts/branch_hours_reply.wav",
     "pdf_url": null
   },
-
+  "branch_location": {
+    "action": "voice_reply",
+    "reply_text": "Манай салбаруудын байршил файлаар илгээгдлээ.",
+    "static_voice_file": "tts/branch_location_reply.wav",
+    "pdf_url": null
+  },
   "contact_support": {
     "action": "voice_reply",
     "reply_text": "Та 1800-XXXX утсаар холбогдоно уу.",

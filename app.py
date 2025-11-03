@@ -41,7 +41,7 @@ IS_RENDER = os.path.exists("/opt/render")
 BASE_DIR = "/opt/render/project/src" if IS_RENDER else os.getcwd()
 os.chdir(BASE_DIR)
 
-HF_MODEL = os.getenv("HF_MODEL", "gana1215/MN_Whisper_Small_CT2")
+HF_MODEL = os.getenv("HF_MODEL", "gana1215/MN_Whisper_Small_CT2U")
 DEVICE = os.getenv("DEVICE", "cpu")
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(BASE_DIR, "local_persistent/record_archive"))
