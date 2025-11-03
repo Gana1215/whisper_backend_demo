@@ -1,10 +1,9 @@
 # ===============================================
-# 💬 Banking Intention Router (Phase 2 — v3.1 Soft Anti-Hallucination Defense)
+# 💬 Banking Intention Router (Phase 2 — Stable v2.2.2)
 # -----------------------------------------------
 # ✅ Unified with Phase 1 (Whisper model)
 # ✅ Dual Voice: static-first vs dynamic Edge-TTS
-# ✅ Clean defense against hallucinated or empty transcriptions
-# ✅ Returns polite fallback reply instead of HTTP 400
+# ✅ Stable classification pipeline (no anti-hallucination)
 # ===============================================
 
 import os, csv, json
@@ -15,7 +14,6 @@ from pydantic import BaseModel
 import joblib
 from pydub import AudioSegment
 from intention.entity_extractor import extract_entities
-from intention.anti_hallucination import defend   # 🧠 new import
 
 # =========================================================
 # 🔹 Global toggles (env defaults)
@@ -126,7 +124,7 @@ def append_metadata(user_id: str, fname: str, text: str, result: Dict[str, Any],
     dlog(f"🗂️ Metadata updated for record {record_id}: {text}")
 
 # =========================================================
-# 🔹 Voice Resolver (Dual Mode — global REPLY_MODE only)
+# 🔹 Voice Resolver (Dual Mode)
 # =========================================================
 def resolve_voice_simple(intent_key: str,
                          intent_data: Dict[str, Any],
@@ -140,7 +138,6 @@ def resolve_voice_simple(intent_key: str,
             return os.path.join(BASE_DIR, rel.lstrip("/"))
         return os.path.join(STATIC_DIR, rel)
 
-    # --- Dynamic Mode ---
     if reply_mode_dynamic:
         if not TTS_AVAILABLE:
             dlog(f"[{intent_key}] Dynamic requested but TTS unavailable.")
@@ -155,7 +152,6 @@ def resolve_voice_simple(intent_key: str,
         dlog(f"[{intent_key}] ✅ Synthesized → {rel_path}")
         return f"/{rel_path}"
 
-    # --- Static Mode (default) ---
     if static_rel:
         static_abs = abs_from_rel(static_rel.strip("/"))
         if os.path.exists(static_abs):
@@ -165,7 +161,6 @@ def resolve_voice_simple(intent_key: str,
         else:
             dlog(f"[{intent_key}] ⚠️ Static file missing → fallback to TTS")
 
-    # --- Fallback to TTS if static missing ---
     if not TTS_AVAILABLE:
         dlog(f"[{intent_key}] ❌ No TTS available.")
         return None
@@ -179,7 +174,7 @@ def resolve_voice_simple(intent_key: str,
     return f"/{rel_path}"
 
 # =========================================================
-# 🔹 Helper: Always load balance text file if present
+# 🔹 Helper: Balance text loader
 # =========================================================
 def load_balance_text(intent_data: Dict[str, Any], dlog) -> Optional[str]:
     balance_cfg = intent_data.get("balance_amount")
@@ -197,7 +192,7 @@ def load_balance_text(intent_data: Dict[str, Any], dlog) -> Optional[str]:
         return None
 
 # =========================================================
-# 🔹 Endpoint 1 — Text Classification
+# 🔹 /classify Endpoint
 # =========================================================
 @router.post("/classify", response_model=IntentResponse)
 def classify_intent(
@@ -231,7 +226,7 @@ def classify_intent(
     return result
 
 # =========================================================
-# 🔹 Endpoint 2 — Voice Input (Soft Anti-Hallucination)
+# 🔹 /voice_intent Endpoint
 # =========================================================
 @router.post("/voice_intent", response_model=IntentResponse)
 async def classify_from_voice(
@@ -280,22 +275,6 @@ async def classify_from_voice(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Whisper transcription failed: {e}")
 
-    # 🧠 --- Anti-hallucination defense ---
-    clean_text = defend(text, dlog)
-    if not clean_text or len(clean_text) < 4:
-        dlog("🚫 Hallucinated or invalid text detected → returning gentle fallback reply.")
-        polite_reply = {
-            "intent": "unknown",
-            "confidence": 0.0,
-            "action": "voice_reply",
-            "reply_text": "Уучлаарай, таны яриаг ойлгосонгүй.",
-            "voice_url": "/static/tts/unknown_reply.wav",
-            "static_voice_file": "/static/tts/unknown_reply.wav",
-        }
-        append_metadata(user_id, fname, text, polite_reply, dlog)
-        return polite_reply
-
-    text = clean_text
     result = classify_text(text)
     domain_action = get_domain_action(result["intent"])
     result.update(domain_action)
