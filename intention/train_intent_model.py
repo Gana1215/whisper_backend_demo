@@ -23,88 +23,88 @@ SEED = 42
 random.seed(SEED)
 
 # --- 1️⃣ seed data if csv missing or too small ---
-SEED_ROWS = [
-    # check_balance
-    ("Би дансныхаа үлдэгдлийг шалгамаар байна", "check_balance"),
-    ("Үлдэгдэл хэд байгаа вэ", "check_balance"),
-    ("Дансны баланс харуул", "check_balance"),
-    ("Үлдэгдлээ хэлээд өгөөч", "check_balance"),
-    ("Дансны үлдэгдэл сонирхож байна", "check_balance"),
+# SEED_ROWS = [
+#     # check_balance
+#     ("Би дансныхаа үлдэгдлийг шалгамаар байна", "check_balance"),
+#     ("Үлдэгдэл хэд байгаа вэ", "check_balance"),
+#     ("Дансны баланс харуул", "check_balance"),
+#     ("Үлдэгдлээ хэлээд өгөөч", "check_balance"),
+#     ("Дансны үлдэгдэл сонирхож байна", "check_balance"),
 
-    # show_transactions
-    ("Гүйлгээний жагсаалт", "show_transactions"),
-    ("Сүүлийн гүйлгээнүүдийг харуул", "show_transactions"),
-    ("Өнөөдрийн гүйлгээг үзье", "show_transactions"),
-    ("Дансны хуулга хэрэгтэй байна", "show_transactions"),
-    ("Гүйлгээгээ хармаар байна", "show_transactions"),
+#     # show_transactions
+#     ("Гүйлгээний жагсаалт", "show_transactions"),
+#     ("Сүүлийн гүйлгээнүүдийг харуул", "show_transactions"),
+#     ("Өнөөдрийн гүйлгээг үзье", "show_transactions"),
+#     ("Дансны хуулга хэрэгтэй байна", "show_transactions"),
+#     ("Гүйлгээгээ хармаар байна", "show_transactions"),
 
-    # lost_card
-    ("Карт маань алга боллоо", "lost_card"),
-    ("Картаа гээчихлээ", "lost_card"),
-    ("Карт олдохгүй байна", "lost_card"),
-    ("Карт блоклоорой", "lost_card"),
-    ("Карт асуудалтай байна", "lost_card"),
+#     # lost_card
+#     ("Карт маань алга боллоо", "lost_card"),
+#     ("Картаа гээчихлээ", "lost_card"),
+#     ("Карт олдохгүй байна", "lost_card"),
+#     ("Карт блоклоорой", "lost_card"),
+#     ("Карт асуудалтай байна", "lost_card"),
 
-    # transfer_money
-    ("100 мянгыг найз руу шилжүүл", "transfer_money"),
-    ("50000 төгрөг шилжүүлээрэй", "transfer_money"),
-    ("Данс руу мөнгө явуул", "transfer_money"),
-    ("Өөрийн данснаас шилжүүлэх", "transfer_money"),
-    ("Амгалангийн данс руу 200 мянга", "transfer_money"),
-    ("Гүйлгээ хийе", "transfer_money"),
-    ("Шилжүүлэг хийе", "transfer_money"),
-    ("Мөнгөн шилжүүлэг хийнээ", "transfer_money"),
-    ("Тэтгэвэр авах", "transfer_money"),
+#     # transfer_money
+#     ("100 мянгыг найз руу шилжүүл", "transfer_money"),
+#     ("50000 төгрөг шилжүүлээрэй", "transfer_money"),
+#     ("Данс руу мөнгө явуул", "transfer_money"),
+#     ("Өөрийн данснаас шилжүүлэх", "transfer_money"),
+#     ("Амгалангийн данс руу 200 мянга", "transfer_money"),
+#     ("Гүйлгээ хийе", "transfer_money"),
+#     ("Шилжүүлэг хийе", "transfer_money"),
+#     ("Мөнгөн шилжүүлэг хийнээ", "transfer_money"),
+#     ("Тэтгэвэр авах", "transfer_money"),
 
-    # open_account
-    ("Шинэ данс нээх хүсэлтэй байна", "open_account"),
-    ("Хадгаламжийн данс нээе", "open_account"),
-    ("Данс нээхэд яах вэ", "open_account"),
-    ("Хүүхдийн хадгаламж нээх", "open_account"),
-    ("Шинэ данс нээмээр байна", "open_account"),
+#     # open_account
+#     ("Шинэ данс нээх хүсэлтэй байна", "open_account"),
+#     ("Хадгаламжийн данс нээе", "open_account"),
+#     ("Данс нээхэд яах вэ", "open_account"),
+#     ("Хүүхдийн хадгаламж нээх", "open_account"),
+#     ("Шинэ данс нээмээр байна", "open_account"),
 
-    # exchange_rate
-    ("Валютын ханш хэд вэ", "exchange_rate"),
-    ("Нэг доллар хэд вэ", "exchange_rate"),
-    ("USD ханш хэлээд өг", "exchange_rate"),
-    ("Евро ханш хэд байна", "exchange_rate"),
-    ("Юанийн ханш", "exchange_rate"),
+#     # exchange_rate
+#     ("Валютын ханш хэд вэ", "exchange_rate"),
+#     ("Нэг доллар хэд вэ", "exchange_rate"),
+#     ("USD ханш хэлээд өг", "exchange_rate"),
+#     ("Евро ханш хэд байна", "exchange_rate"),
+#     ("Юанийн ханш", "exchange_rate"),
 
-    # branch_hours
-    ("Салбар хэдэн цагт ажилладаг вэ", "branch_hours"),
-    ("Ажлын цаг хэд вэ", "branch_hours"),
-    ("Амралтын өдөр нээх үү", "branch_hours"),
-    ("Өнөөдөр хэдэд хаах вэ", "branch_hours"),
-    ("Даваа-Баасан хэдээс хэд хүртэл", "branch_hours"),
+#     # branch_hours
+#     ("Салбар хэдэн цагт ажилладаг вэ", "branch_hours"),
+#     ("Ажлын цаг хэд вэ", "branch_hours"),
+#     ("Амралтын өдөр нээх үү", "branch_hours"),
+#     ("Өнөөдөр хэдэд хаах вэ", "branch_hours"),
+#     ("Даваа-Баасан хэдээс хэд хүртэл", "branch_hours"),
 
-    # contact_support
-    ("Тусламж хэрэгтэй байна", "contact_support"),
-    ("Оператортой холбож өг", "contact_support"),
-    ("Харилцагчийн үйлчилгээтэй ярих", "contact_support"),
-    ("Асуудал гарлаа, туслаач", "contact_support"),
-    ("Дугаар нь хэд вэ тусламжийн", "contact_support"),
+#     # contact_support
+#     ("Тусламж хэрэгтэй байна", "contact_support"),
+#     ("Оператортой холбож өг", "contact_support"),
+#     ("Харилцагчийн үйлчилгээтэй ярих", "contact_support"),
+#     ("Асуудал гарлаа, туслаач", "contact_support"),
+#     ("Дугаар нь хэд вэ тусламжийн", "contact_support"),
 
-    # loan_info
-    ("Танай банкны зээл, зээлийн хүү", "loan_info"),
-    ("Зээл авахад бүрдүүлэх материал", "loan_info"),
-    ("Ипотекийн зээлийн нөхцөл", "loan_info"),
-    ("Хүний зээлийн хүү хэд вэ", "loan_info"),
-    ("Зээлийн шугамын мэдээлэл", "loan_info"),
+#     # loan_info
+#     ("Танай банкны зээл, зээлийн хүү", "loan_info"),
+#     ("Зээл авахад бүрдүүлэх материал", "loan_info"),
+#     ("Ипотекийн зээлийн нөхцөл", "loan_info"),
+#     ("Хүний зээлийн хүү хэд вэ", "loan_info"),
+#     ("Зээлийн шугамын мэдээлэл", "loan_info"),
 
-    # savings_info
-    ("Хадгаламжийн хүү хэд вэ", "savings_info"),
-    ("Хадгаламж нээхэд хамгийн бага дүн", "savings_info"),
-    ("Хугацаат хадгаламжийн нөхцөл", "savings_info"),
-    ("Хүүхдийн хадгаламжийн мэдээлэл", "savings_info"),
-    ("Хадгаламжийн төрөл хэлээд өг", "savings_info"),
+#     # savings_info
+#     ("Хадгаламжийн хүү хэд вэ", "savings_info"),
+#     ("Хадгаламж нээхэд хамгийн бага дүн", "savings_info"),
+#     ("Хугацаат хадгаламжийн нөхцөл", "savings_info"),
+#     ("Хүүхдийн хадгаламжийн мэдээлэл", "savings_info"),
+#     ("Хадгаламжийн төрөл хэлээд өг", "savings_info"),
 
-    # customer_info
-    ("Дансны мэдээллээ шалгах", "customer_info"),
-    ("Клиентийн мэдээлэлээ шинэчлэх", "customer_info"),
-    ("Дансны төрөл, шимтгэлийн талаар", "customer_info"),
-    ("Клиент бүртгэлийн тухай", "customer_info"),
-    ("Данс холбох заавар", "customer_info"),
-]
+#     # customer_info
+#     ("Дансны мэдээллээ шалгах", "customer_info"),
+#     ("Клиентийн мэдээлэлээ шинэчлэх", "customer_info"),
+#     ("Дансны төрөл, шимтгэлийн талаар", "customer_info"),
+#     ("Клиент бүртгэлийн тухай", "customer_info"),
+#     ("Данс холбох заавар", "customer_info"),
+# ]
 
 def ensure_csv():
     if not CSV_PATH.exists():

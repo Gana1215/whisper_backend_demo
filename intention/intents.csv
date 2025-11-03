@@ -31,6 +31,8 @@ text,intent
 Данс нээхэд яах вэ,open_account
 Хүүхдийн хадгаламж нээх,open_account
 Шинэ данс нээмээр байна,open_account
+За шинэ данс нээлгэе,open_account
+Данс нээлгэе,open_account
 Данс нээгээд өгөөч,open_account
 Валютын ханш хэд вэ,exchange_rate
 Нэг доллар хэд вэ,exchange_rate
@@ -66,3 +68,10 @@ USD ханш хэлээд өг,exchange_rate
 Эмээ банкин дээр ирлээ,transfer_money
 Тэр өвөө банкин дээр тэтгэвэрээ авахаар ирлээ,transfer_money
 Тэтгэвэр авах,transfer_money
+Салбарын байршил, branch_location
+Салбаруудын байршил, branch_location
+Салбаруудын байршил, branch_location
+Салбарууд хаа хаа байна, branch_location
+Салбарууд хаана хаана байна, branch_location
+Төв салбар хаана вэ, branch_location
+Хотын салбар хаана вэ,branch_location
