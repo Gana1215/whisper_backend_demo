@@ -1,10 +1,11 @@
 # ===============================================
-# 🎙️ Mongolian Whisper API — Phase 2 (Final Unified)
+# 🎙️ Mongolian Whisper API — Phase 2 (Final Unified v2.2.2)
 # ---------------------------------------------------
 # ✅ Faster-Whisper + Intent module (Phase 1 + 2 unified)
 # ✅ Mounts: /dataset + /intent + static/tts
 # ✅ Hugging Face model direct load (no utils/transcriber)
-# ✅ Works with iOS/Android/Desktop frontends
+# ✅ Works with iOS/Android/Desktop frontends (Whisper + BankAI)
+# ✅ Updated CORS: dual frontend support
 # ===============================================
 
 import os, tempfile, psutil, logging, time, sys
@@ -80,22 +81,32 @@ def log_memory(label=""):
         logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
 
 # -------- FastAPI setup --------
-app = FastAPI(title="Mongolian Whisper API", version="2.2.1")
-# ✅ Strict CORS for Browser Downloads (Phase-2 fix)
+app = FastAPI(title="Mongolian Whisper API", version="2.2.2")
+
+# ===============================================
+# 🌐 CORS Setup — supports Whisper + BankAI + Local + Ngrok
+# ===============================================
+_default_origins = [
+    "https://whisper-frontend-dhx3.onrender.com",  # Whisper frontend (Render)
+    "https://bankai-frontend.onrender.com",        # BankAI frontend (Render)
+    "http://localhost:5173",                       # Local dev
+    "http://127.0.0.1:5173",
+]
+_env_origins = os.getenv("FRONTEND_URLS", "")
+_extra = [o.strip() for o in _env_origins.split(",") if o.strip()]
+_allow_origins = list(dict.fromkeys(_default_origins + _extra))  # deduped list
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://whisper-frontend-dhx3.onrender.com",  # Frontend on Render
-        "http://localhost:5173",                       # Local dev
-        "http://127.0.0.1:5173",
-        "https://4f96af32fcaa.ngrok-free.app",         # Optional tunnel
-    ],
+    allow_origins=_allow_origins,
+    allow_origin_regex=r"^https?://([a-z0-9-]+\.)*ngrok-free\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition"],            # <-- lets browser see filename
+    expose_headers=["Content-Disposition"],
 )
 
+print(f"🌐 CORS origins allowed → {_allow_origins}")
 
 # -------- Include routes --------
 try:
@@ -105,7 +116,6 @@ try:
 except Exception as e:
     print(f"⚠️ dataset_routes import failed: {e}")
 
-# ✅ Added for Phase 2 (Dual-Voice Intention Router)
 try:
     from intention.intent_router import router as intent_router
     app.include_router(intent_router, prefix="/intent")
@@ -177,7 +187,6 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File too large.")
 
-    # --- Decode audio (multi-format safe) ---
     try:
         fmt = "wav"
         ext = os.path.splitext(file.filename or "")[1].lower()
@@ -198,7 +207,7 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
                 data.tobytes(),
                 frame_rate=sr,
                 sample_width=4,
-                channels=1 if len(getattr(data, 'shape', [])) == 1 else data.shape[1],
+                channels=1 if len(getattr(data, "shape", [])) == 1 else data.shape[1],
             )
         finally:
             os.remove(tmp_decode)
@@ -212,12 +221,10 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Audio decode failed: {e}")
 
-    # --- Export WAV for inference ---
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
         audio.export(tmp_wav.name, format="wav")
         tmp_wav_path = tmp_wav.name
 
-    # --- Inference ---
     try:
         t0 = time.perf_counter()
         segments, info = model.transcribe(
