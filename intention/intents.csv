@@ -8,20 +8,20 @@ text,intent
 Салбарын цагийн хуваар,branch_hours
 Салбар хэдэн цагт ажилладаг вэ,branch_hours
 Ажлын цаг хэд вэ,branch_hours
-Амралтын өдөр нээх үү,branch_hours
+Амралтын өдөр ажиллах уу,branch_hours
 Өнөөдөр хэдэд хаах вэ,branch_hours
 Даваа-Баасан хэдээс хэд хүртэл,branch_hours
 Тусламж хэрэгтэй байна,contact_support
 Оператортой холбож өг,contact_support
 Харилцагчийн үйлчилгээтэй ярих,contact_support
-Асуудал гарлаа туслаач,contact_support
+Алдаа гарлаа тусламж,contact_support
 Дугаар нь хэд вэ тусламжийн,contact_support
 Дансны мэдээллээ шалгах,customer_info
-Клиентийн мэдээлэлээ шинэчлэх,customer_info
+Харилцагчийн мэдээлэл шинэчлэх,customer_info
 Дансны төрөл шимтгэлийн талаар,customer_info
 Клиент бүртгэлийн тухай,customer_info
 Данс холбох заавар,customer_info
-Би дансныхаа үлдэгдлийг шалгамаар байна,check_balance
+Би дансныхаа үлдэгдлийг харья,check_balance
 Үлдэгдэл хэд байгаа вэ,check_balance
 Дансны баланс харуул,check_balance
 Үлдэгдлээ хэлээд өгөөч,check_balance
@@ -42,7 +42,7 @@ text,intent
 Шинэ данс нээх хүсэлтэй байна,open_account
 Хадгаламжийн данс нээе,open_account
 Данс нээхэд яах вэ,open_account
-Хүүхдийн хадгаламж нээх,open_account
+Хүүхдийн хадгаламжийн данс нээлгье,open_account
 Шинэ данс нээмээр байна,open_account
 За шинэ данс нээлгэе,open_account
 Данс нээлгэе,open_account
@@ -53,7 +53,7 @@ text,intent
 Хугацаат хадгаламжийн нөхцөл,savings_info
 Хүүхдийн хадгаламжийн мэдээлэл,savings_info
 Хадгаламжийн төрөл хэлээд өг,savings_info
-Гүйлгээний жагсаалт,show_transactions
+Гүйлгээний жагсаалт хуулга харья,show_transactions
 Сүүлийн гүйлгээнүүдийг харуул,show_transactions
 Өнөөдрийн гүйлгээг үзье,show_transactions
 Дансны хуулга хэрэгтэй байна,show_transactions
@@ -71,7 +71,7 @@ USD ханш хэлээд өг,exchange_rate
 Шилжүүлгэ хийе,transfer_money
 Мөнгө шилжүүлье,transfer_money
 Өөрийн данснаас шилжүүлэх,transfer_money
-Амгалангийн данс руу 200 мянга,transfer_money
+Данс руу мөнгө шилжүүлье,transfer_money
 Эмээ банкин дээр ирлээ,transfer_money
 Тэр өвөө банкин дээр тэтгэвэрээ авахаар ирлээ,transfer_money
 Тэтгэвэр авах,transfer_money

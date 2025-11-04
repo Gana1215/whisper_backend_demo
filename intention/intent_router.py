@@ -1,25 +1,35 @@
 # ===============================================
-# 💬 Banking Intention Router (Phase 2 — Stable v2.2.2)
+# 💬 Banking Intention Router
+#    Phase 2 — Stable v2.3 (Similarity Fallback)
 # -----------------------------------------------
-# ✅ Unified with Phase 1 (Whisper model)
+# ✅ Unified with Phase 1 Whisper backend
 # ✅ Dual Voice: static-first vs dynamic Edge-TTS
-# ✅ Stable classification pipeline (no anti-hallucination)
+# ✅ Stable classification + cosine-sim fallback for low-confidence
+#    - INTENT_CONF_THRESHOLD (env, default 0.25)
+#    - INTENT_FALLBACK_K     (env, default 3)
 # ===============================================
 
 import os, csv, json
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
 import joblib
 from pydub import AudioSegment
+
+import numpy as np
+from pathlib import Path
+from sklearn.metrics.pairwise import cosine_similarity
+
 from intention.entity_extractor import extract_entities
 
 # =========================================================
-# 🔹 Global toggles (env defaults)
+# 🔹 Global toggles & thresholds (env defaults)
 # =========================================================
 ENV_DIAG = os.getenv("DIAG", "0") == "1"
-ENV_REPLY_MODE = os.getenv("REPLY_MODE", "0") == "1"  # False=static-first, True=dynamic
+ENV_REPLY_MODE = os.getenv("REPLY_MODE", "0") == "1"         # False=static-first, True=dynamic
+CONF_THRESH = float(os.getenv("INTENT_CONF_THRESHOLD", "0.25"))
+FALLBACK_K = int(os.getenv("INTENT_FALLBACK_K", "3"))
 
 def mk_dlog(enabled: bool):
     def _dlog(*args, **kwargs):
@@ -53,6 +63,7 @@ os.makedirs(TTS_DIR, exist_ok=True)
 VEC_PATH = os.path.join(INTENT_DIR, "tfidf_vectorizer.pkl")
 CLF_PATH = os.path.join(INTENT_DIR, "intent_classifier.pkl")
 DM_PATH  = os.path.join(INTENT_DIR, "domain_model.json")
+CSV_PATH = os.path.join(INTENT_DIR, "intents.csv")
 
 if not (os.path.exists(VEC_PATH) and os.path.exists(CLF_PATH)):
     raise RuntimeError("❌ Intent model files not found — run train_intent_model.py first!")
@@ -61,10 +72,42 @@ vectorizer   = joblib.load(VEC_PATH)
 classifier   = joblib.load(CLF_PATH)
 domain_model = json.load(open(DM_PATH, "r", encoding="utf-8")) if os.path.exists(DM_PATH) else {}
 
+# --- Load training corpus (for fallback) ---
+if not os.path.exists(CSV_PATH):
+    raise RuntimeError("❌ intents.csv not found — required for vector similarity fallback.")
+
+_train_texts: List[str] = []
+_train_labels: List[str] = []
+with open(CSV_PATH, "r", encoding="utf-8") as f:
+    # skip header if present
+    header = f.readline()
+    if "text" in header and "intent" in header:
+        # already consumed header line
+        pass
+    else:
+        # first line was data; keep it
+        f.seek(0)
+    reader = csv.reader(f)
+    for row in reader:
+        if not row or len(row) < 2:
+            continue
+        txt = (row[0] or "").strip()
+        lab = (row[1] or "").strip().lower()
+        if txt and lab:
+            _train_texts.append(txt)
+            _train_labels.append(lab)
+
+if not _train_texts:
+    raise RuntimeError("❌ No rows in intents.csv.")
+
+# Precompute TF-IDF matrix for training texts (for cosine-sim fallback)
+_TRAIN_X = vectorizer.transform(_train_texts)   # sparse matrix
+_TRAIN_Y = np.array(_train_labels)
+
 router = APIRouter(tags=["Bank Intention Handler"])
 
 # =========================================================
-# 🔹 Response Schema
+# 🔹 Response Schema  (fields kept stable)
 # =========================================================
 class IntentResponse(BaseModel):
     intent: str
@@ -76,19 +119,83 @@ class IntentResponse(BaseModel):
     voice_url: Optional[str] = None
     static_voice_file: Optional[str] = None
     balance_amount: Optional[str] = None
+    # Optional debug (won't break frontend; ignore if not needed)
+    base_intent: Optional[str] = None
+    base_confidence: Optional[float] = None
+    fallback_used: Optional[bool] = None
 
 # =========================================================
 # 🔹 Core Helpers
 # =========================================================
-def classify_text(text: str) -> Dict[str, Any]:
+def _majority_vote_topk(similarities: np.ndarray, k: int, dlog) -> Tuple[str, float]:
+    """
+    similarities: (n_train,) array
+    Returns (voted_intent, top_sim) using top-K neighbors.
+    """
+    k = max(1, min(k, similarities.shape[0]))
+    top_idx = np.argpartition(similarities, -k)[-k:]
+    top_idx = top_idx[np.argsort(similarities[top_idx])[::-1]]  # sort desc
+    top_labels = _TRAIN_Y[top_idx]
+
+    # majority vote by label; tie-breaker = highest similarity among that label
+    counts = {}
+    best_sim_for_label = {}
+    for i, lab in zip(top_idx, top_labels):
+        counts[lab] = counts.get(lab, 0) + 1
+        s = float(similarities[i])
+        if lab not in best_sim_for_label or s > best_sim_for_label[lab]:
+            best_sim_for_label[lab] = s
+
+    # choose label with max count; tie-break by best similarity
+    best_label = None
+    best_count = -1
+    best_label_sim = -1.0
+    for lab, cnt in counts.items():
+        sim = best_sim_for_label[lab]
+        if cnt > best_count or (cnt == best_count and sim > best_label_sim):
+            best_label = lab
+            best_count = cnt
+            best_label_sim = sim
+
+    dlog(f"🧭 Fallback top-{k} vote → {best_label} (count={best_count}, best_sim={best_label_sim:.3f})")
+    return best_label, best_label_sim
+
+def classify_text(text: str, dlog=None) -> Dict[str, Any]:
     if not text.strip():
         raise HTTPException(status_code=400, detail="Empty text provided.")
+
     X = vectorizer.transform([text])
-    pred = classifier.predict(X)[0]
-    probs = classifier.predict_proba(X)[0]
-    conf = float(max(probs))
+    base_pred = classifier.predict(X)[0]
+    base_probs = classifier.predict_proba(X)[0]
+    base_conf = float(base_probs.max())
     entities = extract_entities(text)
-    return {"intent": pred, "confidence": conf, "entities": entities, "action": "auto"}
+
+    # Decide if we should fallback
+    if base_conf < CONF_THRESH:
+        # Cosine similarity with the whole training corpus
+        sims = cosine_similarity(X, _TRAIN_X)[0]  # (n_train,)
+        voted_intent, top_sim = _majority_vote_topk(sims, FALLBACK_K, dlog or (lambda *a, **k: None))
+        dlog and dlog(f"⚠️ Low conf {base_conf:.2f} < {CONF_THRESH:.2f} → fallback to {voted_intent} (sim={top_sim:.3f})")
+        return {
+            "intent": voted_intent,
+            "confidence": base_conf,        # keep original prob to stay honest
+            "entities": entities,
+            "action": "auto",
+            "base_intent": base_pred,
+            "base_confidence": base_conf,
+            "fallback_used": True,
+        }
+
+    # Normal path
+    return {
+        "intent": base_pred,
+        "confidence": base_conf,
+        "entities": entities,
+        "action": "auto",
+        "base_intent": base_pred,
+        "base_confidence": base_conf,
+        "fallback_used": False,
+    }
 
 def get_domain_action(intent: str) -> Dict[str, Any]:
     if intent in domain_model:
@@ -121,7 +228,7 @@ def append_metadata(user_id: str, fname: str, text: str, result: Dict[str, Any],
             json.dumps(result.get("entities", {}), ensure_ascii=False),
             result.get("action","")
         ])
-    dlog(f"🗂️ Metadata updated for record {record_id}: {text}")
+    dlog and dlog(f"🗂️ Metadata updated for record {record_id}: {text}")
 
 # =========================================================
 # 🔹 Voice Resolver (Dual Mode)
@@ -140,29 +247,29 @@ def resolve_voice_simple(intent_key: str,
 
     if reply_mode_dynamic:
         if not TTS_AVAILABLE:
-            dlog(f"[{intent_key}] Dynamic requested but TTS unavailable.")
+            dlog and dlog(f"[{intent_key}] Dynamic requested but TTS unavailable.")
             return None
-        dlog(f"[{intent_key}] 🎙️ Dynamic mode → Edge-TTS synthesis")
+        dlog and dlog(f"[{intent_key}] 🎙️ Dynamic mode → Edge-TTS synthesis")
         rel_path = synthesize_tts(
             reply_text,
             voice="mn-MN-YesuiNeural",
             output_dir="static/tts",
             basename=f"{intent_key}_reply"
         )
-        dlog(f"[{intent_key}] ✅ Synthesized → {rel_path}")
+        dlog and dlog(f"[{intent_key}] ✅ Synthesized → {rel_path}")
         return f"/{rel_path}"
 
     if static_rel:
         static_abs = abs_from_rel(static_rel.strip("/"))
         if os.path.exists(static_abs):
             voice_url = f"/static/{static_rel.strip('/')}"
-            dlog(f"[{intent_key}] ✅ Using static studio WAV: {voice_url}")
+            dlog and dlog(f"[{intent_key}] ✅ Using static studio WAV: {voice_url}")
             return voice_url
         else:
-            dlog(f"[{intent_key}] ⚠️ Static file missing → fallback to TTS")
+            dlog and dlog(f"[{intent_key}] ⚠️ Static file missing → fallback to TTS")
 
     if not TTS_AVAILABLE:
-        dlog(f"[{intent_key}] ❌ No TTS available.")
+        dlog and dlog(f"[{intent_key}] ❌ No TTS available.")
         return None
     rel_path = synthesize_tts(
         reply_text,
@@ -170,7 +277,7 @@ def resolve_voice_simple(intent_key: str,
         output_dir="static/tts",
         basename=f"{intent_key}_reply"
     )
-    dlog(f"[{intent_key}] 🌀 Static fallback → synthesized {rel_path}")
+    dlog and dlog(f"[{intent_key}] 🌀 Static fallback → synthesized {rel_path}")
     return f"/{rel_path}"
 
 # =========================================================
@@ -178,17 +285,17 @@ def resolve_voice_simple(intent_key: str,
 # =========================================================
 def load_balance_text(intent_data: Dict[str, Any], dlog) -> Optional[str]:
     balance_cfg = intent_data.get("balance_amount")
-    if not balance_cfg or not balance_cfg.endswith(".txt"):
+    if not balance_cfg or not str(balance_cfg).endswith(".txt"):
         return None
-    abs_path = os.path.join(BASE_DIR, "static", balance_cfg)
+    abs_path = os.path.join(BASE_DIR, "static", str(balance_cfg))
     if not os.path.exists(abs_path):
-        dlog(f"⚠️ Balance file missing: {abs_path}")
+        dlog and dlog(f"⚠️ Balance file missing: {abs_path}")
         return None
     try:
         with open(abs_path, "r", encoding="utf-8") as f:
             return f.read().strip()
     except Exception as e:
-        dlog(f"⚠️ Failed reading balance file: {e}")
+        dlog and dlog(f"⚠️ Failed reading balance file: {e}")
         return None
 
 # =========================================================
@@ -204,7 +311,7 @@ def classify_intent(
     dlog = mk_dlog(req_diag)
     reply_mode_dynamic = ENV_REPLY_MODE if REPLY_MODE_ is None else (str(REPLY_MODE_) == "1")
 
-    result = classify_text(text)
+    result = classify_text(text, dlog=dlog)
     domain_action = get_domain_action(result["intent"])
     result.update(domain_action)
 
@@ -222,7 +329,11 @@ def classify_intent(
     if result["action"] in ("pdf_reply", "file_reply"):
         result["pdf_url"] = domain_action.get("pdf_url")
 
-    dlog(f"🧠 Intent: {result['intent']} (conf={result['confidence']:.2f}) → {result['action']}")
+    dlog and dlog(
+        f"🧠 Intent: {result['intent']} "
+        f"(base={result.get('base_intent')}, conf={result.get('base_confidence'):.2f}, "
+        f"fallback={result.get('fallback_used')}) → {result['action']}"
+    )
     return result
 
 # =========================================================
@@ -257,7 +368,7 @@ async def classify_from_voice(
         os.remove(tmp)
         audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
         audio.export(fpath, format="wav")
-        dlog(f"✅ Archived clean WAV → {fpath}")
+        dlog and dlog(f"✅ Archived clean WAV → {fpath}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Audio decode failed: {e}")
 
@@ -271,11 +382,11 @@ async def classify_from_voice(
             temperature=0.0, word_timestamps=False,
         )
         text = "".join(seg.text for seg in segments).strip()
-        dlog(f"🎧 Transcribed → {text}")
+        dlog and dlog(f"🎧 Transcribed → {text}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Whisper transcription failed: {e}")
 
-    result = classify_text(text)
+    result = classify_text(text, dlog=dlog)
     domain_action = get_domain_action(result["intent"])
     result.update(domain_action)
 
@@ -294,5 +405,9 @@ async def classify_from_voice(
         result["pdf_url"] = domain_action.get("pdf_url")
 
     append_metadata(user_id, fname, text, result, dlog)
-    dlog(f"🎙️ Voice → '{text}' → {result['intent']} (conf={result['confidence']:.2f})")
+    dlog and dlog(
+        f"🎙️ Voice → '{text}' → {result['intent']} "
+        f"(base={result.get('base_intent')}, conf={result.get('base_confidence'):.2f}, "
+        f"fallback={result.get('fallback_used')})"
+    )
     return result
