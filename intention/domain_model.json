@@ -1,13 +1,10 @@
 {
   "check_balance": {
-    "action": "voice_reply",
-    "reply_text": "Харилцагч таны үлдэгдэл:",
-    "static_voice_file": "tts/check_balance_phrase.wav",
-    "balance_amount": "tts/balance_amount.txt",
-    "pdf_url": null,
-    "force_static": false
-  },
-
+  "action": "voice_reply",
+  "reply_text": "Харилцагч таны үлдэгдэл:",
+  "static_voice_file": "tts/check_balance_reply.wav",
+  "pdf_url": null
+},
   "show_transactions": {
     "action": "voice_reply",
     "reply_text": "Таны сүүлийн гурван гүйлгээг мессежээр илгээв.",
@@ -38,15 +35,15 @@
   },
 
   "exchange_rate": {
-    "action": "voice_reply",
-    "reply_text": "1 ам.доллар = 3,450 төгрөг байна.",
-    "static_voice_file": "tts/exchange_reply.wav",
-    "pdf_url": null
-  },
+  "action": "voice_reply",
+  "reply_text": "Өнөөдрийн гадаад валютын ханшийн мэдээлэл:",
+  "static_voice_file": "tts/exchange_rate_reply.wav",
+  "pdf_url": null
+},
 
   "branch_hours": {
     "action": "voice_reply",
-    "reply_text": "Манай салбарууд ажлын өдрүүдэд 09:00–18:00 цагт ажиллана.",
+    "reply_text": "Манай салбаруудын ажлын өдрүүдэд ажиллах хуваарь:",
     "static_voice_file": "tts/branch_hours_reply.wav",
     "pdf_url": null
   },
@@ -57,17 +54,22 @@
     "pdf_url": null
   },
   "contact_support": {
-    "action": "voice_reply",
-    "reply_text": "Та 1800-XXXX утсаар холбогдоно уу.",
-    "static_voice_file": "tts/contact_support_reply.wav",
-    "pdf_url": null
-  },
-
+  "action": "voice_reply",
+  "reply_text": "Та дараах утсаар холбогдоно уу!",
+  "static_voice_file": "tts/contact_support_reply.wav",
+  "pdf_url": null
+},
   "transfer_money": {
     "action": "voice_reply",
     "reply_text": "Мөнгөн шилжүүлэг амжилттай хийгдлээ.",
     "static_voice_file": "tts/transfer_success.wav",
     "pdf_url": "docs/transfer_receipt.pdf",
     "force_static": true
-  }
+  },
+  "account_details": {
+    "action": "voice_reply",
+    "reply_text": "Таны дансны дэлгэрэнгүй мэдээлэл :",
+    "static_voice_file": "tts/account_details.wav"
+}
+
 }

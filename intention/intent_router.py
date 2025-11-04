@@ -1,6 +1,6 @@
 # ===============================================
 # 💬 Banking Intention Router
-#    Phase 2 — Stable v2.7 (Secure Static Reply + CoreBank Display)
+#    Phase 2 — Stable v2.8 (Secure Static + CoreBank Phone)
 # -----------------------------------------------
 # ✅ Unified with Phase 1 Whisper backend
 # ✅ Static voice replies only (no dynamic synthesis)
@@ -117,6 +117,7 @@ def _get_corebank_table(dlog=None) -> Dict[str, str]:
         _cached_corebank = {}
     return _cached_corebank
 
+# Intent → CoreBank keys to fetch
 INTENT_KEY_MAP = {
     "check_balance":   ["account_balance", "account_type", "customer_name"],
     "exchange_rate":   ["usd_rate", "eur_rate", "loan_rate"],
@@ -124,6 +125,7 @@ INTENT_KEY_MAP = {
     "account_details": ["account_balance", "account_type"],
     "loan_info":       ["loan_rate"],
     "customer_info":   ["customer_name"],
+    "contact_support": ["branch_phone"],  # ✅ NEW: dynamic phone from CSV
 }
 
 def attach_corebank_data(intent_key: str, dlog):
@@ -170,11 +172,12 @@ def get_domain_action(intent):
                                      "reply_text": "Уучлаарай, таны хүсэлтийг ойлгосонгүй."})
 
 # =========================================================
-# 🔹 Secure CoreBank Display Builder
+# 🔹 Secure CoreBank Display Builder (never voiced)
 # =========================================================
 def build_secure_display(intent: str, cb: Dict[str, str]) -> str:
     """Builds privacy-safe text display (never spoken)."""
     if not cb: return ""
+
     if intent == "check_balance":
         txt = []
         if "account_type" in cb:
@@ -182,15 +185,31 @@ def build_secure_display(intent: str, cb: Dict[str, str]) -> str:
         if "account_balance" in cb:
             txt.append(f"Үлдэгдэл : {cb['account_balance']}")
         return "\n".join(txt)
+
     if intent == "branch_hours" and "branch_hours" in cb:
-        return f"Салбаруудын ажиллах цагийн хуваарь : {cb['branch_hours']}"
+        return f"Манай салбаруудын ажлын өдрүүдэд ажиллах хуваарь : {cb['branch_hours']}"
+
     if intent == "exchange_rate":
-        rates = []
-        if "usd_rate" in cb: rates.append(f"USD : {cb['usd_rate']}")
-        if "eur_rate" in cb: rates.append(f"EUR : {cb['eur_rate']}")
-        return "  ".join(rates)
+        parts = []
+        if "usd_rate" in cb: parts.append(f"USD : {cb['usd_rate']}")
+        if "eur_rate" in cb: parts.append(f"EUR : {cb['eur_rate']}")
+        if "loan_rate" in cb: parts.append(f"Зээлийн хүү : {cb['loan_rate']}")
+        return "  ".join(parts)
+
     if intent == "customer_info" and "customer_name" in cb:
         return f"Харилцагчийн нэр : {cb['customer_name']}"
+
+    if intent == "contact_support" and "branch_phone" in cb:
+        # ✅ Display only; voice file should be a generic prompt like:
+        # "Та дараах утсаар холбогдоно уу?"
+        return f"☎️ Холбоо барих утас : {cb['branch_phone']}"
+
+    if intent == "account_details":
+        lines = []
+        if "account_type" in cb:   lines.append(f"Дансны төрөл : {cb['account_type']}")
+        if "account_balance" in cb: lines.append(f"Үлдэгдэл : {cb['account_balance']}")
+        return "\n".join(lines)
+
     return ""
 
 # =========================================================
@@ -205,8 +224,14 @@ def classify_intent(text: str = Form(...)):
 
     cb = attach_corebank_data(result["intent"], dlog)
     if cb: result["corebank_data"] = cb
+
+    # Dynamic text (display only)
     result["reply_text"] = build_secure_display(result["intent"], cb)
-    result["voice_url"] = f"/static/{domain_action.get('static_voice_file','').strip('/')}" if domain_action.get("static_voice_file") else None
+
+    # Static voice (generic phrase only; no sensitive values inside audio)
+    result["voice_url"] = f"/static/{domain_action.get('static_voice_file','').strip('/')}" \
+        if domain_action.get("static_voice_file") else None
+
     return result
 
 # =========================================================
@@ -236,10 +261,17 @@ async def classify_from_voice(user_id: str = Form(...), file: UploadFile = File(
     result = classify_text(text, dlog)
     domain_action = get_domain_action(result["intent"])
     result.update(domain_action)
+
     cb = attach_corebank_data(result["intent"], dlog)
     if cb: result["corebank_data"] = cb
+
+    # Dynamic text (display only)
     result["reply_text"] = build_secure_display(result["intent"], cb)
-    result["voice_url"] = f"/static/{domain_action.get('static_voice_file','').strip('/')}" if domain_action.get("static_voice_file") else None
+
+    # Static voice (generic phrase only; no sensitive values inside audio)
+    result["voice_url"] = f"/static/{domain_action.get('static_voice_file','').strip('/')}" \
+        if domain_action.get("static_voice_file") else None
+
     return result
 
 # =========================================================
