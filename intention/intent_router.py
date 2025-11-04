@@ -1,51 +1,36 @@
 # ===============================================
 # 💬 Banking Intention Router
-#    Phase 2 — Stable v2.3 (Similarity Fallback)
+#    Phase 2 — Stable v2.7 (Secure Static Reply + CoreBank Display)
 # -----------------------------------------------
 # ✅ Unified with Phase 1 Whisper backend
-# ✅ Dual Voice: static-first vs dynamic Edge-TTS
-# ✅ Stable classification + cosine-sim fallback for low-confidence
-#    - INTENT_CONF_THRESHOLD (env, default 0.25)
-#    - INTENT_FALLBACK_K     (env, default 3)
+# ✅ Static voice replies only (no dynamic synthesis)
+# ✅ CoreBank CSV auto-reload → text display only
+# ✅ Never voice sensitive data like balances
+# ✅ /intent/corebank_data endpoint for debug
 # ===============================================
 
-import os, csv, json
+import os, csv, json, time
 from datetime import datetime
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
 import joblib
 from pydub import AudioSegment
-
 import numpy as np
-from pathlib import Path
 from sklearn.metrics.pairwise import cosine_similarity
-
 from intention.entity_extractor import extract_entities
 
 # =========================================================
-# 🔹 Global toggles & thresholds (env defaults)
+# 🔹 Global toggles
 # =========================================================
 ENV_DIAG = os.getenv("DIAG", "0") == "1"
-ENV_REPLY_MODE = os.getenv("REPLY_MODE", "0") == "1"         # False=static-first, True=dynamic
 CONF_THRESH = float(os.getenv("INTENT_CONF_THRESHOLD", "0.25"))
 FALLBACK_K = int(os.getenv("INTENT_FALLBACK_K", "3"))
 
 def mk_dlog(enabled: bool):
-    def _dlog(*args, **kwargs):
-        if enabled:
-            print(*args, **kwargs)
+    def _dlog(*a, **k):
+        if enabled: print(*a, **k)
     return _dlog
-
-# =========================================================
-# 🔹 Optional Edge-TTS synthesis
-# =========================================================
-try:
-    from intention.edge_tts import synthesize_tts
-    TTS_AVAILABLE = True
-except Exception as e:
-    print(f"⚠️ TTS module import failed: {e}")
-    TTS_AVAILABLE = False
 
 # =========================================================
 # 🔹 Paths & Model Loading
@@ -53,61 +38,39 @@ except Exception as e:
 BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INTENT_DIR = os.path.join(BASE_DIR, "intention")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-DOCS_DIR   = os.path.join(STATIC_DIR, "docs")
-TTS_DIR    = os.path.join(STATIC_DIR, "tts")
-
+COREBANK_CSV = os.path.join(STATIC_DIR, "corebank_reply.csv")
 ARCHIVE_DIR = os.path.join(BASE_DIR, "local_persistent", "intention_archive")
 os.makedirs(os.path.join(ARCHIVE_DIR, "wavs"), exist_ok=True)
-os.makedirs(TTS_DIR, exist_ok=True)
 
 VEC_PATH = os.path.join(INTENT_DIR, "tfidf_vectorizer.pkl")
 CLF_PATH = os.path.join(INTENT_DIR, "intent_classifier.pkl")
 DM_PATH  = os.path.join(INTENT_DIR, "domain_model.json")
 CSV_PATH = os.path.join(INTENT_DIR, "intents.csv")
 
-if not (os.path.exists(VEC_PATH) and os.path.exists(CLF_PATH)):
-    raise RuntimeError("❌ Intent model files not found — run train_intent_model.py first!")
-
 vectorizer   = joblib.load(VEC_PATH)
 classifier   = joblib.load(CLF_PATH)
 domain_model = json.load(open(DM_PATH, "r", encoding="utf-8")) if os.path.exists(DM_PATH) else {}
 
-# --- Load training corpus (for fallback) ---
-if not os.path.exists(CSV_PATH):
-    raise RuntimeError("❌ intents.csv not found — required for vector similarity fallback.")
-
-_train_texts: List[str] = []
-_train_labels: List[str] = []
+# =========================================================
+# 🔹 Load training corpus for cosine fallback
+# =========================================================
+_train_texts, _train_labels = [], []
 with open(CSV_PATH, "r", encoding="utf-8") as f:
-    # skip header if present
     header = f.readline()
-    if "text" in header and "intent" in header:
-        # already consumed header line
-        pass
-    else:
-        # first line was data; keep it
+    if "text" not in header or "intent" not in header:
         f.seek(0)
     reader = csv.reader(f)
     for row in reader:
-        if not row or len(row) < 2:
-            continue
-        txt = (row[0] or "").strip()
-        lab = (row[1] or "").strip().lower()
-        if txt and lab:
-            _train_texts.append(txt)
-            _train_labels.append(lab)
-
-if not _train_texts:
-    raise RuntimeError("❌ No rows in intents.csv.")
-
-# Precompute TF-IDF matrix for training texts (for cosine-sim fallback)
-_TRAIN_X = vectorizer.transform(_train_texts)   # sparse matrix
+        if len(row) >= 2:
+            _train_texts.append(row[0].strip())
+            _train_labels.append(row[1].strip().lower())
+_TRAIN_X = vectorizer.transform(_train_texts)
 _TRAIN_Y = np.array(_train_labels)
 
 router = APIRouter(tags=["Bank Intention Handler"])
 
 # =========================================================
-# 🔹 Response Schema  (fields kept stable)
+# 🔹 Response Schema
 # =========================================================
 class IntentResponse(BaseModel):
     intent: str
@@ -117,297 +80,171 @@ class IntentResponse(BaseModel):
     reply_text: Optional[str] = None
     pdf_url: Optional[str] = None
     voice_url: Optional[str] = None
-    static_voice_file: Optional[str] = None
-    balance_amount: Optional[str] = None
-    # Optional debug (won't break frontend; ignore if not needed)
+    corebank_data: Optional[Dict[str, str]] = None
     base_intent: Optional[str] = None
     base_confidence: Optional[float] = None
     fallback_used: Optional[bool] = None
 
 # =========================================================
-# 🔹 Core Helpers
+# 🔹 CoreBank CSV auto-reload system
 # =========================================================
-def _majority_vote_topk(similarities: np.ndarray, k: int, dlog) -> Tuple[str, float]:
-    """
-    similarities: (n_train,) array
-    Returns (voted_intent, top_sim) using top-K neighbors.
-    """
-    k = max(1, min(k, similarities.shape[0]))
-    top_idx = np.argpartition(similarities, -k)[-k:]
-    top_idx = top_idx[np.argsort(similarities[top_idx])[::-1]]  # sort desc
-    top_labels = _TRAIN_Y[top_idx]
+_last_load_time = 0.0
+_cached_corebank: Dict[str, str] = {}
 
-    # majority vote by label; tie-breaker = highest similarity among that label
-    counts = {}
-    best_sim_for_label = {}
+def _read_corebank_csv(path: str) -> Dict[str, str]:
+    data = {}
+    if not os.path.exists(path): return data
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if "name" in row and "text" in row:
+                    n = row["name"].strip().lower()
+                    data[n] = row["text"].strip()
+    except Exception:
+        return {}
+    return data
+
+def _get_corebank_table(dlog=None) -> Dict[str, str]:
+    """Auto-reloads if file modified."""
+    global _last_load_time, _cached_corebank
+    try:
+        mtime = os.path.getmtime(COREBANK_CSV)
+        if mtime != _last_load_time:
+            _cached_corebank = _read_corebank_csv(COREBANK_CSV)
+            _last_load_time = mtime
+            dlog and dlog(f"♻️ Reloaded CoreBank CSV ({len(_cached_corebank)} entries)")
+    except FileNotFoundError:
+        _cached_corebank = {}
+    return _cached_corebank
+
+INTENT_KEY_MAP = {
+    "check_balance":   ["account_balance", "account_type", "customer_name"],
+    "exchange_rate":   ["usd_rate", "eur_rate", "loan_rate"],
+    "branch_hours":    ["branch_hours"],
+    "account_details": ["account_balance", "account_type"],
+    "loan_info":       ["loan_rate"],
+    "customer_info":   ["customer_name"],
+}
+
+def attach_corebank_data(intent_key: str, dlog):
+    table = _get_corebank_table(dlog)
+    keys = INTENT_KEY_MAP.get(intent_key, [])
+    data = {k: v for k, v in table.items() if k in [x.lower() for x in keys]}
+    if data:
+        for k, v in data.items(): dlog and dlog(f"💾 CoreBank[{k}] → {v}")
+    return data or None
+
+# =========================================================
+# 🔹 Classification core logic
+# =========================================================
+def _majority_vote_topk(sims: np.ndarray, k: int, dlog):
+    k = max(1, min(k, sims.shape[0]))
+    top_idx = np.argpartition(sims, -k)[-k:]
+    top_idx = top_idx[np.argsort(sims[top_idx])[::-1]]
+    top_labels = _TRAIN_Y[top_idx]
+    counts, best_sim = {}, {}
     for i, lab in zip(top_idx, top_labels):
         counts[lab] = counts.get(lab, 0) + 1
-        s = float(similarities[i])
-        if lab not in best_sim_for_label or s > best_sim_for_label[lab]:
-            best_sim_for_label[lab] = s
+        s = float(sims[i])
+        if lab not in best_sim or s > best_sim[lab]:
+            best_sim[lab] = s
+    label = max(counts, key=lambda l: (counts[l], best_sim[l]))
+    dlog and dlog(f"🧭 Fallback top-{k} → {label}")
+    return label, best_sim[label]
 
-    # choose label with max count; tie-break by best similarity
-    best_label = None
-    best_count = -1
-    best_label_sim = -1.0
-    for lab, cnt in counts.items():
-        sim = best_sim_for_label[lab]
-        if cnt > best_count or (cnt == best_count and sim > best_label_sim):
-            best_label = lab
-            best_count = cnt
-            best_label_sim = sim
-
-    dlog(f"🧭 Fallback top-{k} vote → {best_label} (count={best_count}, best_sim={best_label_sim:.3f})")
-    return best_label, best_label_sim
-
-def classify_text(text: str, dlog=None) -> Dict[str, Any]:
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="Empty text provided.")
-
+def classify_text(text: str, dlog=None):
     X = vectorizer.transform([text])
-    base_pred = classifier.predict(X)[0]
-    base_probs = classifier.predict_proba(X)[0]
-    base_conf = float(base_probs.max())
+    pred = classifier.predict(X)[0]
+    prob = classifier.predict_proba(X)[0].max()
     entities = extract_entities(text)
+    if prob < CONF_THRESH:
+        sims = cosine_similarity(X, _TRAIN_X)[0]
+        voted, _ = _majority_vote_topk(sims, FALLBACK_K, dlog)
+        return {"intent": voted, "confidence": prob, "entities": entities,
+                "base_intent": pred, "base_confidence": prob, "fallback_used": True}
+    return {"intent": pred, "confidence": prob, "entities": entities,
+            "base_intent": pred, "base_confidence": prob, "fallback_used": False}
 
-    # Decide if we should fallback
-    if base_conf < CONF_THRESH:
-        # Cosine similarity with the whole training corpus
-        sims = cosine_similarity(X, _TRAIN_X)[0]  # (n_train,)
-        voted_intent, top_sim = _majority_vote_topk(sims, FALLBACK_K, dlog or (lambda *a, **k: None))
-        dlog and dlog(f"⚠️ Low conf {base_conf:.2f} < {CONF_THRESH:.2f} → fallback to {voted_intent} (sim={top_sim:.3f})")
-        return {
-            "intent": voted_intent,
-            "confidence": base_conf,        # keep original prob to stay honest
-            "entities": entities,
-            "action": "auto",
-            "base_intent": base_pred,
-            "base_confidence": base_conf,
-            "fallback_used": True,
-        }
-
-    # Normal path
-    return {
-        "intent": base_pred,
-        "confidence": base_conf,
-        "entities": entities,
-        "action": "auto",
-        "base_intent": base_pred,
-        "base_confidence": base_conf,
-        "fallback_used": False,
-    }
-
-def get_domain_action(intent: str) -> Dict[str, Any]:
-    if intent in domain_model:
-        return domain_model[intent]
-    return {
-        "description": "Unknown intent",
-        "action": "voice_reply",
-        "reply_text": "Уучлаарай, таны хүсэлтийг ойлгосонгүй."
-    }
-
-def append_metadata(user_id: str, fname: str, text: str, result: Dict[str, Any], dlog):
-    meta_path = os.path.join(ARCHIVE_DIR, "metadata.csv")
-    header = ["record_id","user_id","file_name","created_at","text",
-              "intent","confidence","entities","action"]
-    exists = os.path.exists(meta_path)
-    record_id = 1
-    if exists:
-        with open(meta_path, "r", encoding="utf-8") as m:
-            lines = m.readlines()
-            if len(lines) > 1:
-                record_id = len(lines)
-    with open(meta_path, "a", encoding="utf-8", newline="") as m:
-        w = csv.writer(m)
-        if not exists:
-            w.writerow(header)
-        w.writerow([
-            record_id, user_id, fname,
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            text, result.get("intent",""), result.get("confidence",0.0),
-            json.dumps(result.get("entities", {}), ensure_ascii=False),
-            result.get("action","")
-        ])
-    dlog and dlog(f"🗂️ Metadata updated for record {record_id}: {text}")
+def get_domain_action(intent):
+    return domain_model.get(intent, {"action": "voice_reply",
+                                     "reply_text": "Уучлаарай, таны хүсэлтийг ойлгосонгүй."})
 
 # =========================================================
-# 🔹 Voice Resolver (Dual Mode)
+# 🔹 Secure CoreBank Display Builder
 # =========================================================
-def resolve_voice_simple(intent_key: str,
-                         intent_data: Dict[str, Any],
-                         reply_mode_dynamic: bool,
-                         dlog) -> Optional[str]:
-    reply_text = intent_data.get("reply_text", "")
-    static_rel = intent_data.get("static_voice_file")
-
-    def abs_from_rel(rel: str) -> str:
-        if rel.startswith("/static/"):
-            return os.path.join(BASE_DIR, rel.lstrip("/"))
-        return os.path.join(STATIC_DIR, rel)
-
-    if reply_mode_dynamic:
-        if not TTS_AVAILABLE:
-            dlog and dlog(f"[{intent_key}] Dynamic requested but TTS unavailable.")
-            return None
-        dlog and dlog(f"[{intent_key}] 🎙️ Dynamic mode → Edge-TTS synthesis")
-        rel_path = synthesize_tts(
-            reply_text,
-            voice="mn-MN-YesuiNeural",
-            output_dir="static/tts",
-            basename=f"{intent_key}_reply"
-        )
-        dlog and dlog(f"[{intent_key}] ✅ Synthesized → {rel_path}")
-        return f"/{rel_path}"
-
-    if static_rel:
-        static_abs = abs_from_rel(static_rel.strip("/"))
-        if os.path.exists(static_abs):
-            voice_url = f"/static/{static_rel.strip('/')}"
-            dlog and dlog(f"[{intent_key}] ✅ Using static studio WAV: {voice_url}")
-            return voice_url
-        else:
-            dlog and dlog(f"[{intent_key}] ⚠️ Static file missing → fallback to TTS")
-
-    if not TTS_AVAILABLE:
-        dlog and dlog(f"[{intent_key}] ❌ No TTS available.")
-        return None
-    rel_path = synthesize_tts(
-        reply_text,
-        voice="mn-MN-YesuiNeural",
-        output_dir="static/tts",
-        basename=f"{intent_key}_reply"
-    )
-    dlog and dlog(f"[{intent_key}] 🌀 Static fallback → synthesized {rel_path}")
-    return f"/{rel_path}"
+def build_secure_display(intent: str, cb: Dict[str, str]) -> str:
+    """Builds privacy-safe text display (never spoken)."""
+    if not cb: return ""
+    if intent == "check_balance":
+        txt = []
+        if "account_type" in cb:
+            txt.append(f"Таны дансны төрөл : {cb['account_type']}")
+        if "account_balance" in cb:
+            txt.append(f"Үлдэгдэл : {cb['account_balance']}")
+        return "\n".join(txt)
+    if intent == "branch_hours" and "branch_hours" in cb:
+        return f"Салбаруудын ажиллах цагийн хуваарь : {cb['branch_hours']}"
+    if intent == "exchange_rate":
+        rates = []
+        if "usd_rate" in cb: rates.append(f"USD : {cb['usd_rate']}")
+        if "eur_rate" in cb: rates.append(f"EUR : {cb['eur_rate']}")
+        return "  ".join(rates)
+    if intent == "customer_info" and "customer_name" in cb:
+        return f"Харилцагчийн нэр : {cb['customer_name']}"
+    return ""
 
 # =========================================================
-# 🔹 Helper: Balance text loader
-# =========================================================
-def load_balance_text(intent_data: Dict[str, Any], dlog) -> Optional[str]:
-    balance_cfg = intent_data.get("balance_amount")
-    if not balance_cfg or not str(balance_cfg).endswith(".txt"):
-        return None
-    abs_path = os.path.join(BASE_DIR, "static", str(balance_cfg))
-    if not os.path.exists(abs_path):
-        dlog and dlog(f"⚠️ Balance file missing: {abs_path}")
-        return None
-    try:
-        with open(abs_path, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except Exception as e:
-        dlog and dlog(f"⚠️ Failed reading balance file: {e}")
-        return None
-
-# =========================================================
-# 🔹 /classify Endpoint
+# 🔹 /classify
 # =========================================================
 @router.post("/classify", response_model=IntentResponse)
-def classify_intent(
-    text: str = Form(...),
-    DIAG_: Optional[int] = Form(None),
-    REPLY_MODE_: Optional[int] = Form(None)
-):
-    req_diag = ENV_DIAG if DIAG_ is None else (str(DIAG_) == "1")
-    dlog = mk_dlog(req_diag)
-    reply_mode_dynamic = ENV_REPLY_MODE if REPLY_MODE_ is None else (str(REPLY_MODE_) == "1")
-
-    result = classify_text(text, dlog=dlog)
+def classify_intent(text: str = Form(...)):
+    dlog = mk_dlog(ENV_DIAG)
+    result = classify_text(text, dlog)
     domain_action = get_domain_action(result["intent"])
     result.update(domain_action)
 
-    if "static_voice_file" in domain_action:
-        result["static_voice_file"] = domain_action["static_voice_file"]
-
-    if result["action"] == "voice_reply":
-        result["voice_url"] = resolve_voice_simple(
-            result["intent"], domain_action, reply_mode_dynamic, dlog
-        )
-        balance_text = load_balance_text(domain_action, dlog)
-        if balance_text:
-            result["balance_amount"] = balance_text
-
-    if result["action"] in ("pdf_reply", "file_reply"):
-        result["pdf_url"] = domain_action.get("pdf_url")
-
-    dlog and dlog(
-        f"🧠 Intent: {result['intent']} "
-        f"(base={result.get('base_intent')}, conf={result.get('base_confidence'):.2f}, "
-        f"fallback={result.get('fallback_used')}) → {result['action']}"
-    )
+    cb = attach_corebank_data(result["intent"], dlog)
+    if cb: result["corebank_data"] = cb
+    result["reply_text"] = build_secure_display(result["intent"], cb)
+    result["voice_url"] = f"/static/{domain_action.get('static_voice_file','').strip('/')}" if domain_action.get("static_voice_file") else None
     return result
 
 # =========================================================
-# 🔹 /voice_intent Endpoint
+# 🔹 /voice_intent
 # =========================================================
 @router.post("/voice_intent", response_model=IntentResponse)
-async def classify_from_voice(
-    user_id: str = Form(...),
-    file: UploadFile = File(...),
-    DIAG_: Optional[int] = Form(None),
-    REPLY_MODE_: Optional[int] = Form(None)
-):
-    req_diag = ENV_DIAG if DIAG_ is None else (str(DIAG_) == "1")
-    dlog = mk_dlog(req_diag)
-    reply_mode_dynamic = ENV_REPLY_MODE if REPLY_MODE_ is None else (str(REPLY_MODE_) == "1")
+async def classify_from_voice(user_id: str = Form(...), file: UploadFile = File(...)):
+    dlog = mk_dlog(ENV_DIAG)
 
-    contents = await file.read()
+    # save WAV
     wav_dir = os.path.join(ARCHIVE_DIR, "wavs")
     os.makedirs(wav_dir, exist_ok=True)
     fname = f"int{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
-    fpath = os.path.join(wav_dir, fname)
+    tmp = f"{fname}.tmp"
+    with open(tmp, "wb") as t: t.write(await file.read())
+    audio = AudioSegment.from_file(tmp)
+    os.remove(tmp)
+    path = os.path.join(wav_dir, fname)
+    audio.set_frame_rate(44100).set_channels(1).set_sample_width(2).export(path, format="wav")
 
-    try:
-        fmt = "wav"
-        ext = os.path.splitext(file.filename or "")[1].lower()
-        if "webm" in ext: fmt = "webm"
-        elif "mp4" in ext or "m4a" in ext: fmt = "mp4"
-        elif "ogg" in ext: fmt = "ogg"
-        tmp = fpath + ".tmp"
-        with open(tmp, "wb") as t: t.write(contents)
-        audio = AudioSegment.from_file(tmp, format=fmt)
-        os.remove(tmp)
-        audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
-        audio.export(fpath, format="wav")
-        dlog and dlog(f"✅ Archived clean WAV → {fpath}")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Audio decode failed: {e}")
+    # transcribe
+    from app import model
+    segs, _ = model.transcribe(path, language="mn", task="transcribe", vad_filter=True)
+    text = "".join(s.text for s in segs).strip()
+    dlog(f"🎧 Transcribed → {text}")
 
-    try:
-        from app import model
-        if model is None:
-            raise HTTPException(status_code=503, detail="Whisper model not loaded yet")
-        segments, info = model.transcribe(
-            fpath, language="mn", task="transcribe",
-            vad_filter=True, beam_size=1, best_of=1,
-            temperature=0.0, word_timestamps=False,
-        )
-        text = "".join(seg.text for seg in segments).strip()
-        dlog and dlog(f"🎧 Transcribed → {text}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Whisper transcription failed: {e}")
-
-    result = classify_text(text, dlog=dlog)
+    result = classify_text(text, dlog)
     domain_action = get_domain_action(result["intent"])
     result.update(domain_action)
-
-    if "static_voice_file" in domain_action:
-        result["static_voice_file"] = domain_action["static_voice_file"]
-
-    if result["action"] == "voice_reply":
-        result["voice_url"] = resolve_voice_simple(
-            result["intent"], domain_action, reply_mode_dynamic, dlog
-        )
-        balance_text = load_balance_text(domain_action, dlog)
-        if balance_text:
-            result["balance_amount"] = balance_text
-
-    if result["action"] in ("pdf_reply", "file_reply"):
-        result["pdf_url"] = domain_action.get("pdf_url")
-
-    append_metadata(user_id, fname, text, result, dlog)
-    dlog and dlog(
-        f"🎙️ Voice → '{text}' → {result['intent']} "
-        f"(base={result.get('base_intent')}, conf={result.get('base_confidence'):.2f}, "
-        f"fallback={result.get('fallback_used')})"
-    )
+    cb = attach_corebank_data(result["intent"], dlog)
+    if cb: result["corebank_data"] = cb
+    result["reply_text"] = build_secure_display(result["intent"], cb)
+    result["voice_url"] = f"/static/{domain_action.get('static_voice_file','').strip('/')}" if domain_action.get("static_voice_file") else None
     return result
+
+# =========================================================
+# 🔹 /corebank_data (debug)
+# =========================================================
+@router.get("/corebank_data")
+def get_corebank_data():
+    return _get_corebank_table()

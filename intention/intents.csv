@@ -16,7 +16,6 @@ text,intent
 Харилцагчийн үйлчилгээтэй ярих,contact_support
 Алдаа гарлаа тусламж,contact_support
 Дугаар нь хэд вэ тусламжийн,contact_support
-Дансны мэдээллээ шалгах,customer_info
 Харилцагчийн мэдээлэл шинэчлэх,customer_info
 Дансны төрөл шимтгэлийн талаар,customer_info
 Клиент бүртгэлийн тухай,customer_info
@@ -75,3 +74,9 @@ USD ханш хэлээд өг,exchange_rate
 Эмээ банкин дээр ирлээ,transfer_money
 Тэр өвөө банкин дээр тэтгэвэрээ авахаар ирлээ,transfer_money
 Тэтгэвэр авах,transfer_money
+Танай банк ямар төрлийн данстай вэ,account_details
+Дансны төрлүүдийг хэлж өгөөч,account_details
+Хадгаламжийн болон зээлийн дансны ялгаа юу вэ,account_details
+Дансны төрлүүдийн талаар мэдээлэл өг,account_details
+Дансны мэдээлэл хэрэгтэй байна,account_details
+Дансны мэдээллээ шалгах,account_details
