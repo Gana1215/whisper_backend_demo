@@ -5,7 +5,7 @@ text,intent
 Салбарууд хаана хаана байна,branch_location
 Төв салбар хаана вэ,branch_location
 Хотын салбар хаана вэ,branch_location
-Салбарын цагийн хуваар,branch_hours
+Ажиллах цагийн хуваар,branch_hours
 Салбар хэдэн цагт ажилладаг вэ,branch_hours
 Ажлын цаг хэд вэ,branch_hours
 Амралтын өдөр ажиллах уу,branch_hours
@@ -13,11 +13,17 @@ text,intent
 Даваа-Баасан хэдээс хэд хүртэл,branch_hours
 Тусламж хэрэгтэй байна,contact_support
 Оператортой холбож өг,contact_support
-Харилцагчийн үйлчилгээтэй ярих,contact_support
+Харилцагчийн үйлчилгээтэй холбож өгөөч,contact_support
+Харилцагчийн үйлчилгээнээс юм асууя,contact_support
+Харилцагчийн үйлчилгээтэй яаж холбогдох вэ,contact_support
+Харилцагчийн үйлчилгээний төвтэй холбоо барих,contact_support
 Алдаа гарлаа тусламж,contact_support
 Дугаар нь хэд вэ тусламжийн,contact_support
 Харилцагчийн мэдээлэл шинэчлэх,customer_info
-Дансны төрөл шимтгэлийн талаар,customer_info
+Мэдээлэлээ шинэчлүүлье,customer_info
+Харилцагчийн мэдээлэл шинэчлэх,customer_info
+Мэдээлэл шинэчлэхэд ямар мэдээлэл хэрэгтэй вэ,customer_info
+Дансны төрөл шимтгэлийн талаар,account_details
 Клиент бүртгэлийн тухай,customer_info
 Данс холбох заавар,customer_info
 Би дансныхаа үлдэгдлийг харья,check_balance
