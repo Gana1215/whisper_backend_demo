@@ -1,12 +1,12 @@
 # ===============================================
 # 💬 Banking Intention Router
-#    Phase 2 — Stable v2.8 (Secure Static + CoreBank Phone)
+#    Phase 2 — Stable v2.9 (Always Reply Text)
 # -----------------------------------------------
 # ✅ Unified with Phase 1 Whisper backend
 # ✅ Static voice replies only (no dynamic synthesis)
 # ✅ CoreBank CSV auto-reload → text display only
 # ✅ Never voice sensitive data like balances
-# ✅ /intent/corebank_data endpoint for debug
+# ✅ Always includes reply_text even if CB empty
 # ===============================================
 
 import os, csv, json, time
@@ -125,7 +125,7 @@ INTENT_KEY_MAP = {
     "account_details": ["account_balance", "account_type"],
     "loan_info":       ["loan_rate"],
     "customer_info":   ["customer_name"],
-    "contact_support": ["branch_phone"],  # ✅ NEW: dynamic phone from CSV
+    "contact_support": ["branch_phone"],
 }
 
 def attach_corebank_data(intent_key: str, dlog):
@@ -177,7 +177,6 @@ def get_domain_action(intent):
 def build_secure_display(intent: str, cb: Dict[str, str]) -> str:
     """Builds privacy-safe text display (never spoken)."""
     if not cb: return ""
-
     if intent == "check_balance":
         txt = []
         if "account_type" in cb:
@@ -185,31 +184,23 @@ def build_secure_display(intent: str, cb: Dict[str, str]) -> str:
         if "account_balance" in cb:
             txt.append(f"Үлдэгдэл : {cb['account_balance']}")
         return "\n".join(txt)
-
     if intent == "branch_hours" and "branch_hours" in cb:
         return f"Манай салбаруудын ажлын өдрүүдэд ажиллах хуваарь : {cb['branch_hours']}"
-
     if intent == "exchange_rate":
         parts = []
         if "usd_rate" in cb: parts.append(f"USD : {cb['usd_rate']}")
         if "eur_rate" in cb: parts.append(f"EUR : {cb['eur_rate']}")
         if "loan_rate" in cb: parts.append(f"Зээлийн хүү : {cb['loan_rate']}")
         return "  ".join(parts)
-
     if intent == "customer_info" and "customer_name" in cb:
         return f"Харилцагчийн нэр : {cb['customer_name']}"
-
     if intent == "contact_support" and "branch_phone" in cb:
-        # ✅ Display only; voice file should be a generic prompt like:
-        # "Та дараах утсаар холбогдоно уу?"
         return f"☎️ Холбоо барих утас : {cb['branch_phone']}"
-
     if intent == "account_details":
         lines = []
         if "account_type" in cb:   lines.append(f"Дансны төрөл : {cb['account_type']}")
         if "account_balance" in cb: lines.append(f"Үлдэгдэл : {cb['account_balance']}")
         return "\n".join(lines)
-
     return ""
 
 # =========================================================
@@ -223,14 +214,21 @@ def classify_intent(text: str = Form(...)):
     result.update(domain_action)
 
     cb = attach_corebank_data(result["intent"], dlog)
-    if cb: result["corebank_data"] = cb
+    if cb:
+        result["corebank_data"] = cb
 
-    # Dynamic text (display only)
-    result["reply_text"] = build_secure_display(result["intent"], cb)
+    # ✅ Always return non-empty reply_text
+    base_reply = domain_action.get("reply_text", "").strip()
+    secure_part = build_secure_display(result["intent"], cb).strip() if cb else ""
+    if secure_part:
+        result["reply_text"] = f"{base_reply}\n{secure_part}" if base_reply else secure_part
+    else:
+        result["reply_text"] = base_reply or "Таны хүсэлтийг хүлээн авлаа."
 
-    # Static voice (generic phrase only; no sensitive values inside audio)
-    result["voice_url"] = f"/static/{domain_action.get('static_voice_file','').strip('/')}" \
-        if domain_action.get("static_voice_file") else None
+    # ✅ Only set voice_url if file exists
+    svf = (domain_action.get("static_voice_file") or "").strip().lstrip("/")
+    voice_path = os.path.join(STATIC_DIR, svf.replace("/", os.sep))
+    result["voice_url"] = f"/static/{svf}" if svf and os.path.exists(voice_path) else None
 
     return result
 
@@ -240,19 +238,18 @@ def classify_intent(text: str = Form(...)):
 @router.post("/voice_intent", response_model=IntentResponse)
 async def classify_from_voice(user_id: str = Form(...), file: UploadFile = File(...)):
     dlog = mk_dlog(ENV_DIAG)
-
-    # save WAV
     wav_dir = os.path.join(ARCHIVE_DIR, "wavs")
     os.makedirs(wav_dir, exist_ok=True)
     fname = f"int{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
     tmp = f"{fname}.tmp"
-    with open(tmp, "wb") as t: t.write(await file.read())
+    with open(tmp, "wb") as t:
+        t.write(await file.read())
     audio = AudioSegment.from_file(tmp)
     os.remove(tmp)
     path = os.path.join(wav_dir, fname)
     audio.set_frame_rate(44100).set_channels(1).set_sample_width(2).export(path, format="wav")
 
-    # transcribe
+    # 🎧 Transcribe
     from app import model
     segs, _ = model.transcribe(path, language="mn", task="transcribe", vad_filter=True)
     text = "".join(s.text for s in segs).strip()
@@ -263,14 +260,21 @@ async def classify_from_voice(user_id: str = Form(...), file: UploadFile = File(
     result.update(domain_action)
 
     cb = attach_corebank_data(result["intent"], dlog)
-    if cb: result["corebank_data"] = cb
+    if cb:
+        result["corebank_data"] = cb
 
-    # Dynamic text (display only)
-    result["reply_text"] = build_secure_display(result["intent"], cb)
+    # ✅ Always non-empty reply_text
+    base_reply = domain_action.get("reply_text", "").strip()
+    secure_part = build_secure_display(result["intent"], cb).strip() if cb else ""
+    if secure_part:
+        result["reply_text"] = f"{base_reply}\n{secure_part}" if base_reply else secure_part
+    else:
+        result["reply_text"] = base_reply or "Таны хүсэлтийг хүлээн авлаа."
 
-    # Static voice (generic phrase only; no sensitive values inside audio)
-    result["voice_url"] = f"/static/{domain_action.get('static_voice_file','').strip('/')}" \
-        if domain_action.get("static_voice_file") else None
+    # ✅ Only set voice_url if file exists
+    svf = (domain_action.get("static_voice_file") or "").strip().lstrip("/")
+    voice_path = os.path.join(STATIC_DIR, svf.replace("/", os.sep))
+    result["voice_url"] = f"/static/{svf}" if svf and os.path.exists(voice_path) else None
 
     return result
 
