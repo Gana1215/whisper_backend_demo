@@ -464,6 +464,17 @@ def get_corebank_data():
 # 🔹 /list_intents — Dynamic front-end button menu
 # =========================================================
 
+
+
+#===========
+@router.post("/text_intent", response_model=IntentResponse)
+async def classify_text_intent(payload: dict):
+    text = payload.get("text", "")
+    if not text:
+        return {"intent": "error", "reply_text": "⚠️ Хоосон хүсэлт ирсэн."}
+    return classify_intent(text=text)
+#===========
+
 @router.get("/list_intents")
 def list_intents():
     """
