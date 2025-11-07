@@ -1,10 +1,9 @@
 # ===============================================
 # 💬 Banking Intention Router
-#    Phase 2 — v3.3 (SmartDirect + Dynamic Clarify + Yesui TTS Cache)
+#    Phase 2 — v3.1.2 (Dynamic Clarify + Yesui TTS Cache + Direct-Intent Buttons)
 # -----------------------------------------------
-# ✅ Clarify-button clicks → 1:1 direct intent (skip classifier/confidence)
-# ✅ Clear text fast-path (keywords) → direct intent (skip classifier)
-# ✅ Generic/ambiguous → dynamic clarify (Mongolian buckets)
+# ✅ Keeps v3.1.1 logic fully intact (dynamic clarify, Yesui TTS cache)
+# ✅ Adds 1:1 direct-intent handling for clarify-button clicks
 # ✅ Clarify MP3 auto-cache via mn-MN-YesuiNeural (edge-tts)
 # ✅ Fallback to /static/tts/fallback_clarify.mp3 on failure
 # ===============================================
@@ -45,7 +44,7 @@ def get_static_voice_path(static_file: str, static_dir: str = "static") -> Optio
 ENV_DIAG = os.getenv("DIAG", "0") == "1"
 CONF_THRESH = float(os.getenv("INTENT_CONF_THRESHOLD", "0.25"))
 FALLBACK_K = int(os.getenv("INTENT_FALLBACK_K", "3"))
-YESUI_VOICE = "mn-MN-YesuiNeural"  # 🔒 our helper
+YESUI_VOICE = "mn-MN-YesuiNeural"
 
 def mk_dlog(enabled: bool):
     def _dlog(*a, **k):
@@ -193,23 +192,6 @@ INTENT_TITLES: Dict[str, str] = {
     "lost_card": "Карт хаалгах / тусламж",
 }
 
-# ✅ Fast-path intent keywords (no ML when matched)
-FAST_PATH_KEYWORDS: Dict[str, List[str]] = {
-    "open_account": ["данс нээх", "шинэ данс", "данс үүсгэх"],
-    "check_balance": ["үлдэгдэл шалгах", "дансны үлдэгдэл"],
-    "account_details": ["дансны мэдээлэл", "дансны дэлгэрэнгүй"],
-    "show_transactions": ["хуулга", "гүйлгээний хуулга"],
-    "transfer_money": ["мөнгө шилжүүлэх", "данс руу шилжүүлэх"],
-    "exchange_rate": ["валютын ханш", "ханш"],
-    "branch_hours": ["ажлын цаг", "цагийн хуваарь"],
-    "branch_location": ["салбарын байршил", "салбар хаана"],
-    "lost_card": ["карт хаах", "карт алдсан"],
-    "loan_info": ["зээлийн мэдээлэл", "зээлийн хүү"],
-    "savings_info": ["хадгаламжийн мэдээлэл"],
-    "contact_support": ["харилцагчийн үйлчилгээ", "үйлчилгээний төв"],
-    "customer_info": ["мэдээлэл шинэчлэх", "нэр солих"],
-}
-
 GENERIC_TRIGGERS = [
     "данс", "даанс", "данса", "дансны",
     "үйлчилгээ", "үйлчилгээнүүд", "ямар үйлчилгээ", "ямар ямар үйлчилгээ",
@@ -266,56 +248,15 @@ def ensure_clarify_mp3(word: str, dlog) -> Optional[str]:
     return None
 
 # =========================================================
-# 🔹 Direct-intent resolution (used by buttons & fast-path)
-# =========================================================
-def resolve_direct_intent(intent_key: str, dlog) -> IntentResponse:
-    # Use domain_model if present, else provide minimal default action
-    domain_action = domain_model.get(intent_key, {"action": "voice_reply",
-                                                  "reply_text": "Таны хүсэлтийг хүлээн авлаа."})
-    result: Dict[str, Any] = {
-        "intent": intent_key,
-        "confidence": 1.0,                # direct selection = full confidence
-        "entities": {},
-        "action": domain_action.get("action", "voice_reply"),
-        "pdf_url": domain_action.get("pdf_url"),
-        "base_intent": intent_key,
-        "base_confidence": 1.0,
-        "fallback_used": False
-    }
-
-    # CoreBank (optional enrichment)
-    cb = attach_corebank_data(intent_key, dlog)
-    if cb: result["corebank_data"] = cb
-
-    # Text body (+ secure display add-on if any)
-    base_reply = (domain_action.get("reply_text") or "").strip()
-    secure_part = build_secure_display(intent_key, cb).strip() if cb else ""
-    result["reply_text"] = f"{base_reply}\n{secure_part}" if secure_part else (base_reply or "Таны хүсэлтийг хүлээн авлаа.")
-
-    # Voice file resolution (prefer static if provided)
-    svf = (domain_action.get("static_voice_file") or "").strip().lstrip("/")
-    resolved = get_static_voice_path(svf, STATIC_DIR) if svf else None
-    result["voice_url"] = f"/static/{resolved}" if resolved else None
-
-    return IntentResponse(**result)
-
-# =========================================================
 # 🔹 Clarify decision (with direct-intent guard)
 # =========================================================
 def maybe_clarify_flow(text: str, pred_intent: str, conf: float, dlog) -> Optional[Dict[str, Any]]:
-    """
-    Trigger clarify when:
-    - Text hits a generic trigger AND classifier isn't giving a strong, specific match in that bucket, OR
-    - Confidence is low and bucket has multiple plausible intents.
-    """
     text_norm = normalize_text(text)
 
-    # Helper: if the predicted intent belongs to the bucket and is strong → don't clarify.
     def strong_and_in_bucket(bucket: str) -> bool:
         related = collect_related_intents(bucket)
         return (conf >= 0.60) and (pred_intent in related)
 
-    # 1) Generic triggers → find bucket; skip clarify if strong specific match
     for kw in GENERIC_TRIGGERS:
         if fuzzy_token_match(text_norm, kw):
             bucket = "данс" if kw.startswith("даа") or kw.startswith("данс") else kw
@@ -334,7 +275,6 @@ def maybe_clarify_flow(text: str, pred_intent: str, conf: float, dlog) -> Option
                     "clarify_keyword": bucket,
                 }
 
-    # 2) Low confidence → if bucket has multiple intents, clarify
     if conf < max(0.45, CONF_THRESH):
         bucket_word = INTENT_KEYWORDS.get(pred_intent)
         if bucket_word:
@@ -416,24 +356,14 @@ def build_secure_display(intent: str, cb: Dict[str, str]) -> str:
     return ""
 
 # =========================================================
-# 🔹 /classify — with fast-path direct matching
+# 🔹 /classify (unchanged)
 # =========================================================
 @router.post("/classify", response_model=IntentResponse)
 def classify_intent(text: str = Form(...)):
     dlog = mk_dlog(ENV_DIAG)
-    text_norm = normalize_text(text)
-
-    # 0) 🔥 Fast-path: exact/clear keywords → direct intent (skip ML)
-    for key, kws in FAST_PATH_KEYWORDS.items():
-        if any(fuzzy_token_match(text_norm, kw) for kw in kws):
-            dlog and dlog(f"⚡ Fast-path keyword match → {key}")
-            return resolve_direct_intent(key, dlog)
-
-    # 1) ML classifier
     result = classify_text(text, dlog)
     pred_intent, prob = result["intent"], result["confidence"]
 
-    # 2) Clarify decision
     clarify = maybe_clarify_flow(text, pred_intent, prob, dlog)
     if clarify:
         return IntentResponse(
@@ -450,7 +380,6 @@ def classify_intent(text: str = Form(...)):
             fallback_used=result.get("fallback_used"),
         )
 
-    # 3) Direct reply for confident ML path
     domain_action = get_domain_action(pred_intent)
     result.update(domain_action)
     cb = attach_corebank_data(pred_intent, dlog)
@@ -464,7 +393,7 @@ def classify_intent(text: str = Form(...)):
     return IntentResponse(**result)
 
 # =========================================================
-# 🔹 /voice_intent — STT → classify (kept as-is)
+# 🔹 /voice_intent (unchanged)
 # =========================================================
 @router.post("/voice_intent", response_model=IntentResponse)
 async def classify_from_voice(user_id: str = Form(...), file: UploadFile = File(...)):
@@ -485,13 +414,6 @@ async def classify_from_voice(user_id: str = Form(...), file: UploadFile = File(
     text = "".join(s.text for s in segs).strip()
     dlog(f"🎧 Transcribed → {text}")
 
-    # Fast-path for voice text too
-    text_norm = normalize_text(text)
-    for key, kws in FAST_PATH_KEYWORDS.items():
-        if any(fuzzy_token_match(text_norm, kw) for kw in kws):
-            dlog and dlog(f"⚡ Fast-path (voice) keyword match → {key}")
-            return resolve_direct_intent(key, dlog)
-
     result = classify_text(text, dlog)
     pred_intent, prob = result["intent"], result["confidence"]
 
@@ -524,24 +446,66 @@ async def classify_from_voice(user_id: str = Form(...), file: UploadFile = File(
     return IntentResponse(**result)
 
 # =========================================================
-# 🔹 /corebank_data (debug)
+# 🔹 /corebank_data (unchanged)
 # =========================================================
 @router.get("/corebank_data")
 def get_corebank_data():
     return _get_corebank_table()
 
 # =========================================================
-# 🔹 /list_intents — Dynamic front-end button menu (kept)
+# 🔹 /text_intent (patched for 1:1 button-intents)
+# =========================================================
+@router.post("/text_intent", response_model=IntentResponse)
+async def classify_text_intent(payload: dict):
+    dlog = mk_dlog(ENV_DIAG)
+    intent_key = payload.get("intent")
+    source = payload.get("source", "")
+    text = payload.get("text", "")
+
+    # 🟢 1:1 Direct intent from clarify button
+    if intent_key and source == "clarify_click":
+        dlog and dlog(f"👉 Direct 1:1 intent click → {intent_key}")
+        domain_action = get_domain_action(intent_key)
+        cb = attach_corebank_data(intent_key, dlog)
+        base_reply = domain_action.get("reply_text", "").strip()
+        secure_part = build_secure_display(intent_key, cb).strip() if cb else ""
+        reply = f"{base_reply}\n{secure_part}" if secure_part else base_reply or "Таны хүсэлтийг хүлээн авлаа."
+        svf = (domain_action.get("static_voice_file") or "").strip().lstrip("/")
+        resolved = get_static_voice_path(svf, STATIC_DIR)
+        vurl = f"/static/{resolved}" if resolved else None
+        return IntentResponse(
+            intent=intent_key,
+            confidence=1.0,
+            entities={},
+            action=domain_action.get("action", "voice_reply"),
+            reply_text=reply,
+            pdf_url=domain_action.get("pdf_url"),
+            voice_url=vurl,
+            corebank_data=cb or {},
+            base_intent=intent_key,
+            base_confidence=1.0,
+            fallback_used=False
+        )
+
+    # 🔹 Otherwise normal text classification
+    if text:
+        return classify_intent(text=text)
+
+    # 🔸 Empty fallback
+    return IntentResponse(
+        intent="error",
+        confidence=0.0,
+        entities={},
+        action="voice_reply",
+        reply_text="⚠️ Хоосон хүсэлт ирсэн."
+    )
+
+# =========================================================
+# 🔹 /list_intents (unchanged)
 # =========================================================
 @router.get("/list_intents")
 def list_intents():
-    """
-    Returns a minimal list of available intent names and display titles
-    for front-end quick-access rounded buttons (no reply text).
-    """
     intents = []
-
-    # --- Prefer domain_model.json (Phase 2 standard)
     if os.path.exists(DM_PATH):
         try:
             with open(DM_PATH, "r", encoding="utf-8") as f:
@@ -553,8 +517,6 @@ def list_intents():
                 })
         except Exception as e:
             print(f"⚠️ Failed to load domain_model.json: {e}")
-
-    # --- Fallback to intents.csv (Phase 1 compatibility)
     elif os.path.exists(CSV_PATH):
         try:
             with open(CSV_PATH, newline="", encoding="utf-8") as f:
@@ -569,7 +531,6 @@ def list_intents():
         except Exception as e:
             print(f"⚠️ Failed to read intents.csv: {e}")
 
-    # ✅ Ensure unique + sorted output for clean UI
     seen = set()
     unique_intents = []
     for it in intents:
@@ -577,43 +538,4 @@ def list_intents():
             unique_intents.append(it)
             seen.add(it["name"])
     unique_intents.sort(key=lambda x: x["display"])
-
     return {"count": len(unique_intents), "intents": unique_intents}
-
-# =========================================================
-# 🔹 /text_intent — JSON payload:
-#     { "text": "...", "intent": "open_account", "source": "clarify_click" }
-# =========================================================
-class TextIntentPayload(BaseModel):
-    text: Optional[str] = None
-    intent: Optional[str] = None
-    source: Optional[str] = None
-
-@router.post("/text_intent", response_model=IntentResponse)
-async def classify_text_intent(payload: TextIntentPayload):
-    dlog = mk_dlog(ENV_DIAG)
-
-    # 1) If front-end sends a clarify button click → direct 1:1 intent
-    if payload.intent and (payload.source == "clarify_click" or not payload.text):
-        dlog and dlog(f"👉 Direct intent from UI: {payload.intent}")
-        return resolve_direct_intent(payload.intent, dlog)
-
-    # 2) If text present, try fast-path keywords → direct intent
-    if payload.text:
-        text_norm = normalize_text(payload.text)
-        for key, kws in FAST_PATH_KEYWORDS.items():
-            if any(fuzzy_token_match(text_norm, kw) for kw in kws):
-                dlog and dlog(f"⚡ Fast-path (text_intent) keyword match → {key}")
-                return resolve_direct_intent(key, dlog)
-
-        # 3) Else, fallback to /classify logic (kept identical)
-        return classify_intent(text=payload.text)
-
-    # 4) Empty payload
-    return IntentResponse(
-        intent="error",
-        confidence=0.0,
-        entities={},
-        action="voice_reply",
-        reply_text="⚠️ Хоосон хүсэлт ирсэн."
-    )
