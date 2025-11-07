@@ -65,6 +65,11 @@ text,intent
 Гүйлгээгээ хармаар байна,show_transactions
 Хуулгаа гаргаад өгөөч,show_transactions
 Валютын ханш хэд вэ,exchange_rate
+Валютын ханш хэлж өг,exchange_rate
+Өнөөдрийн ханш хэд байна,exchange_rate
+Долларын ханш хэлээд өгөөч,exchange_rate
+Евро долларын ханшийн мэдээлэл,exchange_rate
+Валютын ханш шалгах,exchange_rate
 Нэг доллар хэд вэ,exchange_rate
 USD ханш хэлээд өг,exchange_rate
 Евро ханш хэд байна,exchange_rate
@@ -75,6 +80,12 @@ USD ханш хэлээд өг,exchange_rate
 Гүйлгээ хийе,transfer_money
 Шилжүүлгэ хийе,transfer_money
 Мөнгө шилжүүлье,transfer_money
+Гүйлгээ хийнэ,transfer_money
+Гүйлгээ хийх гэж байна,transfer_money
+Гүйлгээ хийж өг,transfer_money
+Мөнгө шилжүүлэх гүйлгээ хийе,transfer_money
+Гүйлгээ хийнэ үү,transfer_money
+Мөнгөн гуйвуулга хийе,transfer_money
 Өөрийн данснаас шилжүүлэх,transfer_money
 Данс руу мөнгө шилжүүлье,transfer_money
 Эмээ банкин дээр ирлээ,transfer_money
@@ -86,3 +97,42 @@ USD ханш хэлээд өг,exchange_rate
 Дансны төрлүүдийн талаар мэдээлэл өг,account_details
 Дансны мэдээлэл хэрэгтэй байна,account_details
 Дансны мэдээллээ шалгах,account_details
+Нэг доллар хэд вэ,exchange_rate
+1 доллар хэд байна,exchange_rate
+Долларын ханш хэд,exchange_rate
+Тусламжийн дугаар хэд вэ,contact_support
+Холбогдох утас хэд вэ,contact_support
+Харилцагчийн мэдээлэлээ шинэчлүүлье,customer_info
+Мэдээлэл шинэчлэх хүсэлтэй байна,customer_info
+Мэдээлэл шинэчлэх үйлчилгээ,customer_info
+Хадгаламжийн төрөл хэлж өг,savings_info
+Хадгаламжийн төрөл ямар байдаг вэ,savings_info
+Сүүлийн гүйлгээг харья,show_transactions
+Гүйлгээний түүхийг үзье,show_transactions
+Өнөөдрийн гүйлгээнүүдийг харуул,show_transactions
+Зээл авахад хэрэгтэй материал,loan_info
+Зээлийн бичиг баримт,loan_info
+Ажиллах цаг Даваа-Баасан,branch_hours
+Ажлын өдрүүдийн цагийн хуваарь,branch_hours
+Үлдэгдлээ шалга,check_balance
+Үлдэгдэл харуул,check_balance
+Гүйлгээ хийнэ,transfer_money
+Гүйлгээ хийж өг,transfer_money
+Гүйлгээ хийлгэе,transfer_money
+Мөнгө шилжүүлэх гүйлгээ хий,transfer_money
+Гүйлгээ хийх гэж байна,transfer_money
+Хадгаламжийн хүү хэд вэ,savings_info
+Хадгаламжийн хүүгийн хэмжээ хэд вэ,savings_info
+Хадгаламжийн хүүгийн талаар мэдээлэл өг,savings_info
+Хадгаламжийн хүүгийн талаар мэдээлэл авъя,savings_info
+Хадгаламж нээхэд шаардлагатай дүн хэд вэ,savings_info
+Хадгаламж нээхэд хамгийн бага дүн хэд вэ,savings_info
+Гүйлгээгээ хармаар байна,show_transactions
+Гүйлгээгээ үзмээр байна,show_transactions
+Сүүлийн гүйлгээгээ хармаар байна,show_transactions
+Өнөөдрийн гүйлгээгээ хармаар байна,show_transactions
+Хуулгаа гаргаад өгөөч,show_transactions
+Хуулгаа харуул,show_transactions
+Хуулгаа үзмээр байна,show_transactions
+Хуулгаа шалгая,show_transactions
+Гүйлгээний хуулгаа хармаар байна,show_transactions
