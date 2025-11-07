@@ -70,6 +70,13 @@
     "action": "voice_reply",
     "reply_text": "Таны дансны дэлгэрэнгүй мэдээлэл :",
     "static_voice_file": "tts/account_details.wav"
+},
+   "open_account": {
+     "action": "voice_reply",
+     "reply_text": "Та шинэ данс нээх хүсэлт гаргалаа. Манай банканд шинэ данс нээхийн тулд иргэний үнэмлэхээ авчирч нээлгэнэ үү.",
+     "static_voice_file": "tts/open_account_reply.wav",
+     "pdf_url": "docs/open_account_info.pdf",
+  "force_static": true
 }
 
 }

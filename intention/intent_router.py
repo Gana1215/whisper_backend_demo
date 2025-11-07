@@ -1,17 +1,16 @@
-# ===============================================================
+# ===============================================
 # 💬 Banking Intention Router
-#    Phase 2 — v5.1 (Smarter Canonical Edition)
-# ---------------------------------------------------------------
-# ✅ Unified with Phase 1 Whisper backend
-# ✅ Adds Canonical Dynamic Replies (e.g., “Манай банкинд дансны талаар...”)
-# ✅ Static voice replies (MP3→WAV fallback preserved)
-# ✅ CoreBank CSV auto-reload → secure text display
-# ✅ Avoids “Таны асуултыг ойлгосонгүй” when context is clear
-# ===============================================================
+#    Phase 2 — v3.1.1 (Dynamic Clarify + Yesui TTS Cache, direct-intent guard)
+# -----------------------------------------------
+# ✅ Single-intent, high-confidence → direct reply (no clarify)
+# ✅ Generic/ambiguous → dynamic clarify (grouped by Mongolian keyword buckets)
+# ✅ Clarify MP3 auto-cache via mn-MN-YesuiNeural (edge-tts)
+# ✅ Fallback to /static/tts/fallback_clarify.mp3 on failure
+# ===============================================
 
-import os, csv, json, time
+import os, csv, json, time, re, subprocess, shlex
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from fastapi import APIRouter, UploadFile, File, Form
 from pydantic import BaseModel
 import joblib
@@ -19,25 +18,25 @@ from pydub import AudioSegment
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from intention.entity_extractor import extract_entities
-from fastapi.responses import FileResponse
-from collections import defaultdict
 
 # =========================================================
 # 🎧 Smart Static Voice Reply — MP3 → WAV fallback
 # =========================================================
 def get_static_voice_path(static_file: str, static_dir: str = "static") -> Optional[str]:
-    base = static_file.replace(".wav", "").replace(".mp3", "")
+    base = (static_file or "").replace(".wav", "").replace(".mp3", "").strip()
+    if not base:
+        print("⚠️ Missing audio file spec")
+        return None
     mp3_path = os.path.join(static_dir, f"{base}.mp3")
     wav_path = os.path.join(static_dir, f"{base}.wav")
     if os.path.exists(mp3_path):
         print(f"🎵 Using MP3 version → {mp3_path}")
         return f"{base}.mp3"
-    elif os.path.exists(wav_path):
+    if os.path.exists(wav_path):
         print(f"🎵 Using WAV fallback → {wav_path}")
         return f"{base}.wav"
-    else:
-        print(f"⚠️ Missing audio file for {static_file}")
-        return None
+    print(f"⚠️ Missing audio file for {static_file}")
+    return None
 
 # =========================================================
 # 🔹 Global toggles
@@ -45,6 +44,7 @@ def get_static_voice_path(static_file: str, static_dir: str = "static") -> Optio
 ENV_DIAG = os.getenv("DIAG", "0") == "1"
 CONF_THRESH = float(os.getenv("INTENT_CONF_THRESHOLD", "0.25"))
 FALLBACK_K = int(os.getenv("INTENT_FALLBACK_K", "3"))
+YESUI_VOICE = "mn-MN-YesuiNeural"  # 🔒 our helper
 
 def mk_dlog(enabled: bool):
     def _dlog(*a, **k):
@@ -57,9 +57,11 @@ def mk_dlog(enabled: bool):
 BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INTENT_DIR = os.path.join(BASE_DIR, "intention")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+TTS_DIR    = os.path.join(STATIC_DIR, "tts")
 COREBANK_CSV = os.path.join(STATIC_DIR, "corebank_reply.csv")
-ARCHIVE_DIR = os.path.join(BASE_DIR, "local_persistent", "intention_archive")
+ARCHIVE_DIR  = os.path.join(BASE_DIR, "local_persistent", "intention_archive")
 os.makedirs(os.path.join(ARCHIVE_DIR, "wavs"), exist_ok=True)
+os.makedirs(TTS_DIR, exist_ok=True)
 
 VEC_PATH = os.path.join(INTENT_DIR, "tfidf_vectorizer.pkl")
 CLF_PATH = os.path.join(INTENT_DIR, "intent_classifier.pkl")
@@ -89,59 +91,6 @@ _TRAIN_Y = np.array(_train_labels)
 router = APIRouter(tags=["Bank Intention Handler"])
 
 # =========================================================
-# 🔹 Canonical Intent Mapping for Dynamic Replies
-# =========================================================
-INTENT_KEYWORDS = {
-    "check_balance": "данс",
-    "account_details": "данс",
-    "open_account": "данс",
-    "loan_info": "зээл",
-    "savings_info": "хадгаламж",
-    "transfer_money": "гүйлгээ",
-    "show_transactions": "хуулга",
-    "exchange_rate": "ханш",
-    "contact_support": "үйлчилгээ",
-    "customer_info": "мэдээлэл",
-    "branch_location": "салбар",
-    "branch_hours": "цагийн хуваарь",
-    "lost_card": "карт",
-}
-INTENT_GROUPS = defaultdict(list)
-for i, k in INTENT_KEYWORDS.items():
-    INTENT_GROUPS[k].append(i)
-INTENT_LABELS = {
-    "check_balance": "үлдэгдэл шалгах",
-    "account_details": "дансны мэдээлэл",
-    "open_account": "данс нээх",
-    "loan_info": "зээлийн мэдээлэл",
-    "savings_info": "хадгаламжийн үйлчилгээ",
-    "transfer_money": "мөнгө шилжүүлэх",
-    "show_transactions": "гүйлгээний хуулга",
-    "exchange_rate": "валютын ханш",
-    "contact_support": "харилцагчийн үйлчилгээ",
-    "customer_info": "мэдээлэл шинэчлэх",
-    "branch_location": "салбарын байршил",
-    "branch_hours": "ажлын цагийн хуваарь",
-    "lost_card": "карттай холбоотой үйлчилгээ",
-}
-
-def make_dynamic_bank_reply(intent: str) -> Optional[str]:
-    """Return smart dynamic reply if multiple related services share same root."""
-    heard_word = INTENT_KEYWORDS.get(intent)
-    if not heard_word:
-        return None
-    related = INTENT_GROUPS[heard_word]
-    if len(related) <= 1:
-        return None
-    suffix = "ны" if heard_word.endswith(("н", "с", "ц")) else "ийн"
-    labels = [INTENT_LABELS[i] for i in related]
-    options = ", ".join(labels)
-    return (
-        f"Манай банкинд {heard_word}-{suffix} талаар дараах үйлчилгээ байна: "
-        f"{options}. Та аль үйлчилгээ авах вэ?"
-    )
-
-# =========================================================
 # 🔹 Response Schema
 # =========================================================
 class IntentResponse(BaseModel):
@@ -156,6 +105,8 @@ class IntentResponse(BaseModel):
     base_intent: Optional[str] = None
     base_confidence: Optional[float] = None
     fallback_used: Optional[bool] = None
+    intent_choices: Optional[List[str]] = None
+    clarify_keyword: Optional[str] = None
 
 # =========================================================
 # 🔹 CoreBank CSV auto-reload system
@@ -207,6 +158,148 @@ def attach_corebank_data(intent_key: str, dlog):
     return data or None
 
 # =========================================================
+# 🔹 Mongolian keyword buckets (semantic grouping)
+# =========================================================
+INTENT_KEYWORDS: Dict[str, str] = {
+    "check_balance": "данс",
+    "account_details": "данс",
+    "open_account": "данс",
+    "loan_info": "зээл",
+    "savings_info": "хадгаламж",
+    "transfer_money": "гүйлгээ",
+    "show_transactions": "хуулга",
+    "exchange_rate": "ханш",
+    "contact_support": "үйлчилгээ",
+    "customer_info": "мэдээлэл",
+    "branch_location": "салбар",
+    "branch_hours": "цагийн хуваарь",
+    "lost_card": "карт",
+}
+
+INTENT_TITLES: Dict[str, str] = {
+    "contact_support": "Харилцагчийн үйлчилгээ",
+    "customer_info": "Мэдээлэл шинэчлэх үйлчилгээ",
+    "open_account": "Данс нээх үйлчилгээ",
+    "check_balance": "Үлдэгдэл шалгах",
+    "account_details": "Дансны мэдээлэл",
+    "show_transactions": "Гүйлгээний хуулга",
+    "transfer_money": "Мөнгө шилжүүлэх",
+    "savings_info": "Хадгаламжийн мэдээлэл",
+    "loan_info": "Зээлийн мэдээлэл",
+    "exchange_rate": "Валютын ханш",
+    "branch_location": "Салбарын байршил",
+    "branch_hours": "Ажлын цаг",
+    "lost_card": "Карт хаалгах / тусламж",
+}
+
+GENERIC_TRIGGERS = [
+    "данс", "даанс", "данса", "дансны",
+    "үйлчилгээ", "үйлчилгээнүүд", "ямар үйлчилгээ", "ямар ямар үйлчилгээ",
+    "хуулга", "гүйлгээ", "хадгаламж", "зээл", "ханш"
+]
+
+def normalize_text(s: str) -> str:
+    s = s.lower().strip()
+    s = re.sub(r"[^\u0400-\u04FFa-z0-9\s\-]+", " ", s)
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def fuzzy_token_match(text: str, keyword: str) -> bool:
+    text = normalize_text(text)
+    if keyword in text: 
+        return True
+    for tok in text.split():
+        if tok == keyword:
+            return True
+        if len(tok) >= 3 and len(keyword) >= 3:
+            if tok.startswith(keyword[:3]) or keyword.startswith(tok[:3]):
+                return True
+    return False
+
+def collect_related_intents(word: str) -> List[str]:
+    return [i for i, w in INTENT_KEYWORDS.items() if w == word]
+
+def build_clarify_text(word: str, intents: List[str]) -> Tuple[str, List[str]]:
+    titles = [INTENT_TITLES.get(i, i) for i in intents]
+    header = f"Юуны үйлчилгээ вэ, тодруулна уу?\nМанай банкинд {word}анд хамаарах дараах үйлчилгээ байна:"
+    bullet = "\n".join(f"- {t}" for t in titles)
+    return f"{header}\n{bullet}", titles
+
+def ensure_clarify_mp3(word: str, dlog) -> Optional[str]:
+    safe = re.sub(r"[^a-zA-Z0-9_\u0400-\u04FF\-]", "_", word)
+    out_rel = f"tts/clarify_{safe}.mp3"
+    out_abs = os.path.join(STATIC_DIR, out_rel)
+    if os.path.exists(out_abs):
+        dlog and dlog(f"🎙️ Reusing cached clarify → {out_abs}")
+        return f"/static/{out_rel}"
+    tts_text = f"Юуны үйлчилгээ вэ, тодруулна уу? Манай банкинд {word}анд хамаарах дараах үйлчилгээ байна."
+    try:
+        cmd = f'python3 -m edge_tts --voice "{YESUI_VOICE}" --text {shlex.quote(tts_text)} --write-media {shlex.quote(out_abs)}'
+        dlog and dlog(f"🛠️ Generating clarify MP3: {cmd}")
+        subprocess.run(cmd, shell=True, check=True, timeout=25)
+        if os.path.exists(out_abs):
+            return f"/static/{out_rel}"
+    except Exception as e:
+        print(f"⚠️ edge-tts failed for '{word}': {e}")
+    fb_rel = "tts/fallback_clarify.mp3"
+    fb_abs = os.path.join(STATIC_DIR, fb_rel)
+    if os.path.exists(fb_abs):
+        return f"/static/{fb_rel}"
+    return None
+
+# =========================================================
+# 🔹 Clarify decision (with direct-intent guard)
+# =========================================================
+def maybe_clarify_flow(text: str, pred_intent: str, conf: float, dlog) -> Optional[Dict[str, Any]]:
+    """
+    Trigger clarify when:
+    - Text hits a generic trigger AND classifier isn't giving a strong, specific match in that bucket, OR
+    - Confidence is low and bucket has multiple plausible intents.
+    """
+    text_norm = normalize_text(text)
+
+    # Helper: if the predicted intent belongs to the bucket and is strong → don't clarify.
+    def strong_and_in_bucket(bucket: str) -> bool:
+        related = collect_related_intents(bucket)
+        return (conf >= 0.60) and (pred_intent in related)
+
+    # 1) Generic triggers → find bucket; skip clarify if strong specific match
+    for kw in GENERIC_TRIGGERS:
+        if fuzzy_token_match(text_norm, kw):
+            bucket = "данс" if kw.startswith("даа") or kw.startswith("данс") else kw
+            if strong_and_in_bucket(bucket):
+                dlog and dlog("✅ Strong specific match inside bucket — no clarify.")
+                return None
+            related = collect_related_intents(bucket)
+            if related:
+                clarify_text, titles = build_clarify_text(bucket, related)
+                vurl = ensure_clarify_mp3(bucket, dlog)
+                return {
+                    "action": "voice_reply",
+                    "reply_text": clarify_text,
+                    "voice_url": vurl,
+                    "intent_choices": titles,
+                    "clarify_keyword": bucket,
+                }
+
+    # 2) Low confidence → if bucket has multiple intents, clarify
+    if conf < max(0.45, CONF_THRESH):
+        bucket_word = INTENT_KEYWORDS.get(pred_intent)
+        if bucket_word:
+            related = collect_related_intents(bucket_word)
+            if len(related) >= 2:
+                clarify_text, titles = build_clarify_text(bucket_word, related)
+                vurl = ensure_clarify_mp3(bucket_word, dlog)
+                return {
+                    "action": "voice_reply",
+                    "reply_text": clarify_text,
+                    "voice_url": vurl,
+                    "intent_choices": titles,
+                    "clarify_keyword": bucket_word,
+                }
+    return None
+
+# =========================================================
 # 🔹 Classification core logic
 # =========================================================
 def _majority_vote_topk(sims: np.ndarray, k: int, dlog):
@@ -248,15 +341,15 @@ def build_secure_display(intent: str, cb: Dict[str, str]) -> str:
     if not cb: return ""
     if intent == "check_balance":
         txt = []
-        if "account_type" in cb:   txt.append(f"Таны дансны төрөл : {cb['account_type']}")
+        if "account_type" in cb:    txt.append(f"Таны дансны төрөл : {cb['account_type']}")
         if "account_balance" in cb: txt.append(f"Үлдэгдэл : {cb['account_balance']}")
         return "\n".join(txt)
     if intent == "branch_hours" and "branch_hours" in cb:
         return f"Манай салбаруудын ажлын өдрүүдэд ажиллах хуваарь : {cb['branch_hours']}"
     if intent == "exchange_rate":
         parts = []
-        if "usd_rate" in cb: parts.append(f"USD : {cb['usd_rate']}")
-        if "eur_rate" in cb: parts.append(f"EUR : {cb['eur_rate']}")
+        if "usd_rate" in cb:  parts.append(f"USD : {cb['usd_rate']}")
+        if "eur_rate" in cb:  parts.append(f"EUR : {cb['eur_rate']}")
         if "loan_rate" in cb: parts.append(f"Зээлийн хүү : {cb['loan_rate']}")
         return "  ".join(parts)
     if intent == "customer_info" and "customer_name" in cb:
@@ -265,7 +358,7 @@ def build_secure_display(intent: str, cb: Dict[str, str]) -> str:
         return f"☎️ Холбоо барих утас : {cb['branch_phone']}"
     if intent == "account_details":
         lines = []
-        if "account_type" in cb:   lines.append(f"Дансны төрөл : {cb['account_type']}")
+        if "account_type" in cb:    lines.append(f"Дансны төрөл : {cb['account_type']}")
         if "account_balance" in cb: lines.append(f"Үлдэгдэл : {cb['account_balance']}")
         return "\n".join(lines)
     return ""
@@ -277,26 +370,35 @@ def build_secure_display(intent: str, cb: Dict[str, str]) -> str:
 def classify_intent(text: str = Form(...)):
     dlog = mk_dlog(ENV_DIAG)
     result = classify_text(text, dlog)
-    domain_action = get_domain_action(result["intent"])
-    result.update(domain_action)
-    cb = attach_corebank_data(result["intent"], dlog)
-    if cb: result["corebank_data"] = cb
-    base_reply = domain_action.get("reply_text", "").strip()
-    secure_part = build_secure_display(result["intent"], cb).strip() if cb else ""
+    pred_intent, prob = result["intent"], result["confidence"]
 
-    # ✅ Smart Canonical Reply Injection
-    dynamic_reply = make_dynamic_bank_reply(result["intent"])
-    if dynamic_reply:
-        result["reply_text"] = dynamic_reply
-    else:
-        result["reply_text"] = (
-            f"{base_reply}\n{secure_part}" if secure_part else base_reply or "Таны хүсэлтийг хүлээн авлаа."
+    clarify = maybe_clarify_flow(text, pred_intent, prob, dlog)
+    if clarify:
+        return IntentResponse(
+            intent="clarify",
+            confidence=prob,
+            entities=result.get("entities", {}),
+            action=clarify["action"],
+            reply_text=clarify["reply_text"],
+            voice_url=clarify.get("voice_url"),
+            intent_choices=clarify.get("intent_choices"),
+            clarify_keyword=clarify.get("clarify_keyword"),
+            base_intent=result.get("base_intent"),
+            base_confidence=result.get("base_confidence"),
+            fallback_used=result.get("fallback_used"),
         )
 
+    domain_action = get_domain_action(pred_intent)
+    result.update(domain_action)
+    cb = attach_corebank_data(pred_intent, dlog)
+    if cb: result["corebank_data"] = cb
+    base_reply = domain_action.get("reply_text", "").strip()
+    secure_part = build_secure_display(pred_intent, cb).strip() if cb else ""
+    result["reply_text"] = f"{base_reply}\n{secure_part}" if secure_part else base_reply or "Таны хүсэлтийг хүлээн авлаа."
     svf = (domain_action.get("static_voice_file") or "").strip().lstrip("/")
     resolved = get_static_voice_path(svf, STATIC_DIR)
     result["voice_url"] = f"/static/{resolved}" if resolved else None
-    return result
+    return IntentResponse(**result)
 
 # =========================================================
 # 🔹 /voice_intent
@@ -321,26 +423,35 @@ async def classify_from_voice(user_id: str = Form(...), file: UploadFile = File(
     dlog(f"🎧 Transcribed → {text}")
 
     result = classify_text(text, dlog)
-    domain_action = get_domain_action(result["intent"])
-    result.update(domain_action)
-    cb = attach_corebank_data(result["intent"], dlog)
-    if cb: result["corebank_data"] = cb
-    base_reply = domain_action.get("reply_text", "").strip()
-    secure_part = build_secure_display(result["intent"], cb).strip() if cb else ""
+    pred_intent, prob = result["intent"], result["confidence"]
 
-    # ✅ Smart Canonical Reply Injection
-    dynamic_reply = make_dynamic_bank_reply(result["intent"])
-    if dynamic_reply:
-        result["reply_text"] = dynamic_reply
-    else:
-        result["reply_text"] = (
-            f"{base_reply}\n{secure_part}" if secure_part else base_reply or "Таны хүсэлтийг хүлээн авлаа."
+    clarify = maybe_clarify_flow(text, pred_intent, prob, dlog)
+    if clarify:
+        return IntentResponse(
+            intent="clarify",
+            confidence=prob,
+            entities=result.get("entities", {}),
+            action=clarify["action"],
+            reply_text=clarify["reply_text"],
+            voice_url=clarify.get("voice_url"),
+            intent_choices=clarify.get("intent_choices"),
+            clarify_keyword=clarify.get("clarify_keyword"),
+            base_intent=result.get("base_intent"),
+            base_confidence=result.get("base_confidence"),
+            fallback_used=result.get("fallback_used"),
         )
 
+    domain_action = get_domain_action(pred_intent)
+    result.update(domain_action)
+    cb = attach_corebank_data(pred_intent, dlog)
+    if cb: result["corebank_data"] = cb
+    base_reply = domain_action.get("reply_text", "").strip()
+    secure_part = build_secure_display(pred_intent, cb).strip() if cb else ""
+    result["reply_text"] = f"{base_reply}\n{secure_part}" if secure_part else base_reply or "Таны хүсэлтийг хүлээн авлаа."
     svf = (domain_action.get("static_voice_file") or "").strip().lstrip("/")
     resolved = get_static_voice_path(svf, STATIC_DIR)
     result["voice_url"] = f"/static/{resolved}" if resolved else None
-    return result
+    return IntentResponse(**result)
 
 # =========================================================
 # 🔹 /corebank_data (debug)
