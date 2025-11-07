@@ -459,3 +459,54 @@ async def classify_from_voice(user_id: str = Form(...), file: UploadFile = File(
 @router.get("/corebank_data")
 def get_corebank_data():
     return _get_corebank_table()
+
+# =========================================================
+# 🔹 /list_intents — Dynamic front-end button menu
+# =========================================================
+
+@router.get("/list_intents")
+def list_intents():
+    """
+    Returns a minimal list of available intent names and display titles
+    for front-end quick-access rounded buttons (no reply text).
+    """
+    intents = []
+
+    # --- Prefer domain_model.json (Phase 2 standard)
+    if os.path.exists(DM_PATH):
+        try:
+            with open(DM_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for key in data.keys():
+                intents.append({
+                    "name": key,
+                    "display": INTENT_TITLES.get(key) or key.replace("_", " ").title()
+                })
+        except Exception as e:
+            print(f"⚠️ Failed to load domain_model.json: {e}")
+
+    # --- Fallback to intents.csv (Phase 1 compatibility)
+    elif os.path.exists(CSV_PATH):
+        try:
+            with open(CSV_PATH, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    key = row.get("intent", "")
+                    if key:
+                        intents.append({
+                            "name": key,
+                            "display": INTENT_TITLES.get(key) or key.replace("_", " ").title()
+                        })
+        except Exception as e:
+            print(f"⚠️ Failed to read intents.csv: {e}")
+
+    # ✅ Ensure unique + sorted output for clean UI
+    seen = set()
+    unique_intents = []
+    for it in intents:
+        if it["name"] not in seen:
+            unique_intents.append(it)
+            seen.add(it["name"])
+    unique_intents.sort(key=lambda x: x["display"])
+
+    return {"count": len(unique_intents), "intents": unique_intents}
