@@ -19,7 +19,11 @@ from pydub import AudioSegment
 import soundfile as sf
 
 # ✅ NEW: Original HF Whisper (Transformers)
-import torch
+try:
+    import torch  # optional (only needed for HF transformers version)
+except Exception:
+    torch = None
+
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 
 # 🔧 --- Ensure correct import path on Render ---
