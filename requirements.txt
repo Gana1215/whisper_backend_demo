@@ -1,6 +1,6 @@
 # =============================
 # 🎙️ Mongolian Whisper API (Local + Render)
-# FastAPI + Faster-Whisper (CTranslate2)
+# FastAPI + HuggingFace Whisper (PyTorch)
 # =============================
 
 python-dotenv==1.0.1
@@ -16,8 +16,13 @@ scikit-learn==1.5.2
 
 edge-tts==6.1.12
 
-faster-whisper==1.2.0
-ctranslate2==4.6.0
+transformers==4.36.2
+accelerate==0.25.0
+huggingface_hub==0.20.3
+sentencepiece==0.1.99
+
+torch==2.1.2
+torchaudio==2.1.2
 
 soundfile==0.12.1
 pydub==0.25.1
