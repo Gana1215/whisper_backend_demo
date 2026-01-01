@@ -1,35 +1,27 @@
-# Requirements: fastapi, scikit-learn, joblib, edge-tts, transformers
 # =============================
 # 🎙️ Mongolian Whisper API (Local + Render)
-# FastAPI + Faster-Whisper backend
+# FastAPI + Faster-Whisper (CTranslate2)
 # =============================
 
-# --- Environment ---
 python-dotenv==1.0.1
 
-# --- Core Framework ---
 fastapi==0.115.0
-uvicorn==0.38.0
+uvicorn[standard]==0.38.0
 python-multipart==0.0.20
 aiofiles==24.1.0
-requests
-joblib
-scikit-learn
-edge_tts
-# --- Whisper Runtime (CTranslate2 backend) ---
+requests==2.32.3
+
+joblib==1.4.2
+scikit-learn==1.5.2
+
+edge-tts==6.1.12
+
 faster-whisper==1.2.0
 ctranslate2==4.6.0
-# (Optional offline build)
-# ctranslate2==4.6.0 --no-binary=:all:
-# faster-whisper==1.2.0 --no-binary=:all:
 
-# --- Audio & File Handling ---
 soundfile==0.12.1
 pydub==0.25.1
-numpy>=1.24.0
+numpy==1.26.4
 
-# --- Schema & Validation ---
 pydantic==2.9.2
-
-# --- Memory & Diagnostics ---
 psutil==5.9.8
