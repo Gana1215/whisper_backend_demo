@@ -170,6 +170,9 @@ def load_model():
         model.to(dev)
         model.eval()
 
+        # ✅ PATCH: expose model for routers without circular imports
+        app.state.asr_model = model
+
         dlog(f"✅ HF model loaded successfully (device={dev}, dtype={dtype})")
     except Exception as e:
         logging.error(f"❌ Failed to load model: {e}")
@@ -280,14 +283,14 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
 
         with torch.no_grad():
             pred_ids = model.generate(
-            inputs["input_features"],
-            max_new_tokens=128,
-            temperature=0.2,
-            repetition_penalty=1.2,
-            no_repeat_ngram_size=3,
-            forced_decoder_ids=forced,
-            num_beams=2,
-)
+                inputs["input_features"],
+                max_new_tokens=128,
+                temperature=0.2,
+                repetition_penalty=1.2,
+                no_repeat_ngram_size=3,
+                forced_decoder_ids=forced,
+                num_beams=2,
+            )
 
         text = processor.batch_decode(pred_ids, skip_special_tokens=True)[0].strip()
         elapsed_ms = (time.perf_counter() - t0) * 1000
