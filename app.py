@@ -127,12 +127,17 @@ try:
 except Exception as e:
     print(f"⚠️ dataset_routes import failed: {e}")
 
-try:
-    from intention.intent_router import router as intent_router
-    app.include_router(intent_router, prefix="/intent")
-    print("✅ Mounted /intent routes successfully (Dual Voice Phase 2)")
-except Exception as e:
-    print(f"⚠️ intention router not mounted ({e})")
+# try:
+#     from intention.intent_router import router as intent_router
+#     app.include_router(intent_router, prefix="/intent")
+#     print("✅ Mounted /intent routes successfully (Dual Voice Phase 2)")
+# except Exception as e:
+#     print(f"⚠️ intention router not mounted ({e})")
+# ✅ Phase 2 must be present — fail fast if it cannot import
+from intention.intent_router import router as intent_router
+app.include_router(intent_router, prefix="/intent")
+print("✅ Mounted /intent routes successfully")
+
 
 # -------- Static mounts --------
 app.mount("/record_archive", StaticFiles(directory=ARCHIVE_DIR), name="record_archive")
