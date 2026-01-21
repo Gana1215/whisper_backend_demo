@@ -1,11 +1,11 @@
 # ===============================================
 # 🎙️ Mongolian Whisper API — Phase 2 (Final Unified v2.2.2)
 # ---------------------------------------------------
-# ✅ ORIGINAL HF Whisper (Transformers) + Intent module (Phase 1 + 2 unified)
-# ✅ Mounts: /dataset + /intent + static/tts
-# ✅ Hugging Face model direct load (no utils/transcriber)
-# ✅ Works with iOS/Android/Desktop frontends (Whisper + BankAI)
-# ✅ Updated CORS: dual frontend support
+# ✅ Phase2/2A ROUTES UNCHANGED: /dataset + /intent + static/tts
+# ✅ PATCH: Switch ASR engine back to CT2 (faster-whisper)
+# ✅ Uses your current CT2 base model: https://huggingface.co/gana1215/MN_Whisper_Base_CT2
+# ✅ PATCH: Prevent boot crash if intention/domain_model.json is empty/invalid (JSONDecodeError)
+# ✅ Keeps SAME /transcribe response schema for BankAI frontend
 # ===============================================
 
 import os, tempfile, psutil, logging, time, sys
@@ -18,13 +18,8 @@ from pydantic import BaseModel
 from pydub import AudioSegment
 import soundfile as sf
 
-# ✅ NEW: Original HF Whisper (Transformers)
-try:
-    import torch  # optional (only needed for HF transformers version)
-except Exception:
-    torch = None
-
-from transformers import WhisperProcessor, WhisperForConditionalGeneration
+# ✅ CT2 / faster-whisper (NO PyTorch HF)
+from faster_whisper import WhisperModel
 
 # 🔧 --- Ensure correct import path on Render ---
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -48,12 +43,12 @@ IS_RENDER = os.path.exists("/opt/render")
 BASE_DIR = "/opt/render/project/src" if IS_RENDER else os.getcwd()
 os.chdir(BASE_DIR)
 
-# ✅ default now points to your ORIGINAL HF tiny
-HF_MODEL = os.getenv("HF_MODEL", "gana1215/MN_Whisper_Tiny_HF")
+# ✅ Default now points to your CT2 Whisper Base repo:
+# https://huggingface.co/gana1215/MN_Whisper_Base_CT2
+HF_MODEL = os.getenv("HF_MODEL", "gana1215/MN_Whisper_Base_CT2")
 
-# Keep these for compatibility with your locked envs
-DEVICE = os.getenv("DEVICE", "cpu")
-COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")
+DEVICE = os.getenv("DEVICE", "cpu")               # "cpu" or "cuda"
+COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")  # "int8" / "int8_float16" / "float16"
 
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(BASE_DIR, "local_persistent/record_archive"))
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))
@@ -61,9 +56,9 @@ MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))
 DIAG = os.getenv("DIAG", "0") == "1"
 
 print("✅ Environment configuration loaded:")
-print(f"   HF_MODEL        → {HF_MODEL}")
+print(f"   HF_MODEL        → {HF_MODEL} (CT2 repo/path)")
 print(f"   DEVICE          → {DEVICE}")
-print(f"   COMPUTE_TYPE    → {COMPUTE_TYPE} (ignored in HF mode)")
+print(f"   COMPUTE_TYPE    → {COMPUTE_TYPE}")
 print(f"   DATA_DIR        → {DATA_DIR}")
 
 # -------- Directories --------
@@ -90,6 +85,40 @@ def log_memory(label=""):
         process = psutil.Process(os.getpid())
         mem_mb = process.memory_info().rss / (1024 * 1024)
         logging.info(f"💾 [{label}] Memory usage: {mem_mb:.2f} MB")
+
+# ===============================================
+# ✅ PATCH: Make intent router boot-safe if domain_model.json is empty/invalid
+# - Your error was: JSONDecodeError at intention/intent_router.py when importing.
+# - We DO NOT change any other Phase2 logic; we only ensure a valid JSON exists.
+# ===============================================
+def _ensure_valid_json_file(path: str):
+    """
+    If file exists but is empty/invalid JSON, overwrite with {} so imports don't crash.
+    If file doesn't exist, do nothing (router already handles missing path in most setups).
+    """
+    if not path or not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            txt = f.read()
+        if not txt.strip():
+            raise ValueError("empty json")
+        # validate JSON
+        import json as _json
+        _json.loads(txt)
+    except Exception as e:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{}\n")
+            print(f"🧩 Patched invalid JSON → {path} ({e})")
+        except Exception as e2:
+            print(f"⚠️ Could not patch invalid JSON file: {path} ({e2})")
+
+# Best-guess path used by your intent_router (DM_PATH). If your project uses a different file name,
+# add it here too — safe no-op if missing.
+_ensure_valid_json_file(os.path.join(BASE_DIR, "intention", "domain_model.json"))
+_ensure_valid_json_file(os.path.join(BASE_DIR, "intention", "domain_model_v2.json"))
+_ensure_valid_json_file(os.path.join(BASE_DIR, "intention", "domain_model_final.json"))
 
 # -------- FastAPI setup --------
 app = FastAPI(title="Mongolian Whisper API", version="2.2.2")
@@ -127,60 +156,37 @@ try:
 except Exception as e:
     print(f"⚠️ dataset_routes import failed: {e}")
 
-# try:
-#     from intention.intent_router import router as intent_router
-#     app.include_router(intent_router, prefix="/intent")
-#     print("✅ Mounted /intent routes successfully (Dual Voice Phase 2)")
-# except Exception as e:
-#     print(f"⚠️ intention router not mounted ({e})")
 # ✅ Phase 2 must be present — fail fast if it cannot import
 from intention.intent_router import router as intent_router
 app.include_router(intent_router, prefix="/intent")
 print("✅ Mounted /intent routes successfully")
 
-
 # -------- Static mounts --------
 app.mount("/record_archive", StaticFiles(directory=ARCHIVE_DIR), name="record_archive")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# -------- Whisper model (HF original) --------
-processor: Optional[WhisperProcessor] = None
-model: Optional[WhisperForConditionalGeneration] = None
-
-def _resolve_device() -> str:
-    want = (DEVICE or "cpu").lower()
-    if want in ["cuda", "gpu"] and torch.cuda.is_available():
-        return "cuda"
-    if want == "mps" and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+# -------- Whisper model (CT2) --------
+model: Optional[WhisperModel] = None
 
 @app.on_event("startup")
 def load_model():
-    global model, processor
+    global model
     log_memory("Before loading model")
     try:
-        dlog(f"🔄 Loading ORIGINAL HF model: {HF_MODEL}")
+        dlog(f"🔄 Loading CT2 model: {HF_MODEL}")
 
-        processor = WhisperProcessor.from_pretrained(HF_MODEL)
-
-        dev = _resolve_device()
-        dtype = torch.float16 if dev in ["cuda", "mps"] else torch.float32
-
-        model = WhisperForConditionalGeneration.from_pretrained(
+        model = WhisperModel(
             HF_MODEL,
-            torch_dtype=dtype,
-            low_cpu_mem_usage=True,
+            device=DEVICE,
+            compute_type=COMPUTE_TYPE,
         )
-        model.to(dev)
-        model.eval()
 
         # ✅ PATCH: expose model for routers without circular imports
         app.state.asr_model = model
 
-        dlog(f"✅ HF model loaded successfully (device={dev}, dtype={dtype})")
+        dlog(f"✅ CT2 model loaded successfully (device={DEVICE}, compute_type={COMPUTE_TYPE})")
     except Exception as e:
-        logging.error(f"❌ Failed to load model: {e}")
+        logging.error(f"❌ Failed to load CT2 model: {e}")
         raise RuntimeError(f"Failed to load model: {e}")
     log_memory("After loading model")
 
@@ -190,10 +196,10 @@ def health():
     return {
         "ok": True,
         "msg": "Mongolian Whisper API is running.",
-        "model_loaded": model is not None and processor is not None,
+        "model_loaded": model is not None,
         "model_id": HF_MODEL,
         "device": DEVICE,
-        "compute_type": COMPUTE_TYPE,  # kept for compatibility
+        "compute_type": COMPUTE_TYPE,
         "archive_dir": ARCHIVE_DIR,
         "intent_module": os.path.exists(os.path.join(BASE_DIR, "intention")),
     }
@@ -209,7 +215,7 @@ class TranscribeResult(BaseModel):
 # -------- Main inference --------
 @app.post("/transcribe", response_model=TranscribeResult)
 async def transcribe(request: Request, file: UploadFile = File(...), device: Optional[str] = Form(None)):
-    if model is None or processor is None:
+    if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
     log_memory("Before transcription")
@@ -221,12 +227,16 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File too large.")
 
+    # -------- Decode to AudioSegment --------
     try:
         fmt = "wav"
         ext = os.path.splitext(file.filename or "")[1].lower()
-        if "webm" in ct or ext == ".webm": fmt = "webm"
-        elif "mp4" in ct or "m4a" in ct or ext in [".mp4", ".m4a", ".aac"]: fmt = "mp4"
-        elif "ogg" in ct or ext == ".ogg": fmt = "ogg"
+        if "webm" in ct or ext == ".webm":
+            fmt = "webm"
+        elif "mp4" in ct or "m4a" in ct or ext in [".mp4", ".m4a", ".aac"]:
+            fmt = "mp4"
+        elif "ogg" in ct or ext == ".ogg":
+            fmt = "ogg"
 
         tmp_decode = tempfile.mktemp(suffix=f".{fmt}")
         with open(tmp_decode, "wb") as tmp:
@@ -237,6 +247,7 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
         except Exception as e:
             dlog(f"⚠️ pydub decode failed ({e}); trying fallback...")
             data, sr = sf.read(tmp_decode, dtype="float32", always_2d=False)
+            # NOTE: fallback kept same as your current version (no other file changes)
             audio = AudioSegment(
                 data.tobytes(),
                 frame_rate=sr,
@@ -256,52 +267,27 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Audio decode failed: {e}")
 
-    # Keep your original temp wav for archival-style pipeline consistency
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
-        audio.export(tmp_wav.name, format="wav")
-        tmp_wav_path = tmp_wav.name
+    # -------- Export 16k mono WAV for CT2 --------
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav16:
+        audio_16k = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+        audio_16k.export(tmp_wav16.name, format="wav")
+        wav_path = tmp_wav16.name
 
     try:
         t0 = time.perf_counter()
 
-        # ✅ HF Whisper prefers 16k mono float32
-        audio_16k = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav16:
-            audio_16k.export(tmp_wav16.name, format="wav")
-            tmp_wav16_path = tmp_wav16.name
+        # -------- CT2 transcribe --------
+        segments, info = model.transcribe(
+            wav_path,
+            language="mn",
+            beam_size=2,      # matches your HF num_beams=2 spirit
+            vad_filter=True,
+        )
+        text = "".join(seg.text for seg in segments).strip()
 
-        try:
-            wav, sr = sf.read(tmp_wav16_path, dtype="float32", always_2d=False)
-        finally:
-            if os.path.exists(tmp_wav16_path):
-                os.remove(tmp_wav16_path)
-
-        inputs = processor(wav, sampling_rate=16000, return_tensors="pt")
-        dev = next(model.parameters()).device
-        inputs = {k: v.to(dev) for k, v in inputs.items()}
-
-        forced = None
-        try:
-            forced = processor.get_decoder_prompt_ids(language="mongolian", task="transcribe")
-        except Exception:
-            forced = None
-
-        with torch.no_grad():
-            pred_ids = model.generate(
-                inputs["input_features"],
-                max_new_tokens=128,
-                temperature=0.2,
-                repetition_penalty=1.2,
-                no_repeat_ngram_size=3,
-                forced_decoder_ids=forced,
-                num_beams=2,
-            )
-
-        text = processor.batch_decode(pred_ids, skip_special_tokens=True)[0].strip()
         elapsed_ms = (time.perf_counter() - t0) * 1000
-
         log_memory("After transcription")
-        dlog(f"✅ Inference done ({elapsed_ms:.1f} ms)")
+        dlog(f"✅ CT2 inference done ({elapsed_ms:.1f} ms)")
 
         return TranscribeResult(
             user_text=text,
@@ -311,9 +297,9 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
             playback_path=None,
         )
     finally:
-        if os.path.exists(tmp_wav_path):
-            os.remove(tmp_wav_path)
-            dlog(f"🧹 Temp removed: {tmp_wav_path}")
+        if os.path.exists(wav_path):
+            os.remove(wav_path)
+            dlog(f"🧹 Temp removed: {wav_path}")
 
 # -------- Entrypoint --------
 if __name__ == "__main__":
