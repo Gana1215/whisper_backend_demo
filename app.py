@@ -5,6 +5,7 @@
 # ✅ PATCH: Switch ASR engine back to CT2 (faster-whisper)
 # ✅ Uses your current CT2 base model: https://huggingface.co/gana1215/MN_Whisper_Base_CT2
 # ✅ PATCH: Prevent boot crash if intention/domain_model.json is empty/invalid (JSONDecodeError)
+# ✅ PATCH (MINIMAL): Render-safe CT2 load by local snapshot + override tokenizer.json
 # ✅ Keeps SAME /transcribe response schema for BankAI frontend
 # ===============================================
 
@@ -20,6 +21,10 @@ import soundfile as sf
 
 # ✅ CT2 / faster-whisper (NO PyTorch HF)
 from faster_whisper import WhisperModel
+
+# ✅ MINIMAL PATCH deps (Render-safe CT2 download + tokenizer override)
+import shutil
+from huggingface_hub import snapshot_download, hf_hub_download
 
 # 🔧 --- Ensure correct import path on Render ---
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -175,10 +180,30 @@ def load_model():
     try:
         dlog(f"🔄 Loading CT2 model: {HF_MODEL}")
 
+        # ============================================
+        # ✅ MINIMAL PATCH (Render-safe CT2 load)
+        # - Download CT2 repo to persistent disk
+        # - Override tokenizer.json with known-good Whisper tokenizer
+        # - Load from local folder to avoid ModelWrapper parse crash
+        # ============================================
+        local_ct2_dir = os.path.join(BASE_DIR, "local_persistent", "ct2_model")
+        os.makedirs(local_ct2_dir, exist_ok=True)
+
+        snapshot_download(
+            repo_id=HF_MODEL,
+            local_dir=local_ct2_dir,
+            local_dir_use_symlinks=False,
+        )
+
+        # Overwrite tokenizer.json to prevent tokenizers schema crash on Render
+        good_tok = hf_hub_download("openai/whisper-base", "tokenizer.json")
+        shutil.copyfile(good_tok, os.path.join(local_ct2_dir, "tokenizer.json"))
+
         model = WhisperModel(
-            HF_MODEL,
+            local_ct2_dir,
             device=DEVICE,
             compute_type=COMPUTE_TYPE,
+            local_files_only=True,
         )
 
         # ✅ PATCH: expose model for routers without circular imports
