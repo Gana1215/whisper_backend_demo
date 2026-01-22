@@ -1,32 +1,40 @@
 # =============================
 # 🎙️ Mongolian Whisper API (Local + Render)
-# FastAPI + HuggingFace Whisper (PyTorch)
+# FastAPI + HuggingFace Whisper + Faster-Whisper
 # =============================
 
 python-dotenv==1.0.1
 
+# --- API & Server ---
 fastapi==0.115.0
 uvicorn[standard]==0.38.0
 python-multipart==0.0.20
 aiofiles==24.1.0
 requests==2.32.3
+pydantic==2.9.2
+psutil==5.9.8
 
-joblib==1.4.2
-scikit-learn==1.5.2
+# --- ML & NLP ---
+numpy==1.26.4
+soundfile==0.12.1
+pydub==0.25.1
+sentencepiece==0.1.99
 
+# --- TTS ---
 edge-tts==6.1.12
 
+# --- HuggingFace Whisper (HF fallback mode) ---
 transformers==4.36.2
 accelerate==0.25.0
 huggingface_hub==0.20.3
-sentencepiece==0.1.99
-
 torch==2.1.2
 torchaudio==2.1.2
+safetensors==0.4.2
 
-soundfile==0.12.1
-pydub==0.25.1
-numpy==1.26.4
+# --- Intent Router (Sklearn pickle exact version) ---
+joblib==1.4.2
+scikit-learn==1.6.1     # ★ FIXED: must match your pickled model version
 
-pydantic==2.9.2
-psutil==5.9.8
+# --- Phase 2A Faster-Whisper (CT2 backend STT) ---
+faster-whisper==1.0.3   # ★ REQUIRED: removes ModuleNotFoundError
+ctranslate2==4.4.0      # ★ REQUIRED: GPU/CPU safe, works on Render CPU
