@@ -11,16 +11,25 @@ services:
     region: oregon
 
     buildCommand: |
-      apt-get update && apt-get install -y ffmpeg
-      pip install --upgrade pip
-      pip install -r requirements.txt
+      set -eux
+      apt-get update
+      apt-get install -y ffmpeg
+      python -m pip install --upgrade pip
+      # ✅ Force clean deps so pins take effect (fixes sklearn 1.5.2 sticking)
+      python -m pip uninstall -y scikit-learn joblib || true
+      python -m pip install --no-cache-dir -r requirements.txt
+      python -m pip show scikit-learn || true
 
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
 
     envVars:
       # 🔧 Model + runtime config
       - key: HF_MODEL
-        value: gana1215/MN_Whisper_Small_CT2
+        value: gana1215/MN_Whisper_Tiny_HF
+        # NOTE:
+        # - If your app.py uses HF Whisper (transformers) -> set HF repo here (Tiny_HF)
+        # - If your app.py uses faster-whisper CT2 -> set CT2 repo/path here (Small_CT2)
+
       - key: DEVICE
         value: cpu
       - key: COMPUTE_TYPE
@@ -28,8 +37,7 @@ services:
       - key: DIAG
         value: "1"
 
-      # 🧱 Phase 1 dataset path (used by app.py)
-      #    Point it inside the mounted persistent folder
+      # 🧱 Dataset path (mounted persistent disk)
       - key: DATA_DIR
         value: /opt/render/project/src/local_persistent/record_archive
 
@@ -39,12 +47,17 @@ services:
       - key: MAX_DURATION_SEC
         value: "30"         # 30 seconds
 
-    # 💾 Persistent disk (stores BOTH Phase 1 and Phase 2 archives)
+      # ✅ Add this if your intent router loads domain_model.json from disk
+      # (Only if your code expects it; otherwise ignore)
+      # - key: DOMAIN_MODEL_PATH
+      #   value: /opt/render/project/src/intention/domain_model.json
+
+    # 💾 Persistent disk
     disk:
       name: whisper_dataset_storage
       mountPath: /opt/render/project/src/local_persistent
       sizeGB: 1
 
-    # 🩺 Health check — ensures API is responsive
+    # 🩺 Health check
     healthCheckPath: /
     healthCheckTimeout: 120
