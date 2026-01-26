@@ -2,10 +2,9 @@
 # 🎙️ Mongolian Whisper API — Phase 2 (Final Unified v2.2.2)
 # ---------------------------------------------------
 # ✅ Phase2/2A ROUTES UNCHANGED: /dataset + /intent + static/tts
-# ✅ PATCH: Switch ASR engine back to CT2 (faster-whisper)
-# ✅ Uses your current CT2 base model: https://huggingface.co/gana1215/MN_Whisper_Base_CT2
-# ✅ PATCH: Prevent boot crash if intention/domain_model.json is empty/invalid (JSONDecodeError)
-# ✅ PATCH (MINIMAL): Render-safe CT2 load by local snapshot + override tokenizer.json
+# ✅ CT2 (faster-whisper) engine
+# ✅ GOLDEN PATCH: Render-safe CT2 load by local snapshot (NO tokenizer overwrite)
+# ✅ PROD PATCH: Anti-stutter decoding (beam=5, repetition penalty, no-repeat ngram, warm prompt)
 # ✅ Keeps SAME /transcribe response schema for BankAI frontend
 # ===============================================
 
@@ -22,9 +21,8 @@ import soundfile as sf
 # ✅ CT2 / faster-whisper (NO PyTorch HF)
 from faster_whisper import WhisperModel
 
-# ✅ MINIMAL PATCH deps (Render-safe CT2 download + tokenizer override)
-import shutil
-from huggingface_hub import snapshot_download, hf_hub_download
+# ✅ Render-safe CT2 download
+from huggingface_hub import snapshot_download
 
 # 🔧 --- Ensure correct import path on Render ---
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -48,8 +46,7 @@ IS_RENDER = os.path.exists("/opt/render")
 BASE_DIR = "/opt/render/project/src" if IS_RENDER else os.getcwd()
 os.chdir(BASE_DIR)
 
-# ✅ Default now points to your CT2 Whisper Base repo:
-# https://huggingface.co/gana1215/MN_Whisper_Base_CT2
+# ✅ Set this to your BetterGolden CT2 repo (FP16 or INT8)
 HF_MODEL = os.getenv("HF_MODEL", "gana1215/MN_Whisper_Base_CT2")
 
 DEVICE = os.getenv("DEVICE", "cpu")               # "cpu" or "cuda"
@@ -93,14 +90,8 @@ def log_memory(label=""):
 
 # ===============================================
 # ✅ PATCH: Make intent router boot-safe if domain_model.json is empty/invalid
-# - Your error was: JSONDecodeError at intention/intent_router.py when importing.
-# - We DO NOT change any other Phase2 logic; we only ensure a valid JSON exists.
 # ===============================================
 def _ensure_valid_json_file(path: str):
-    """
-    If file exists but is empty/invalid JSON, overwrite with {} so imports don't crash.
-    If file doesn't exist, do nothing (router already handles missing path in most setups).
-    """
     if not path or not os.path.exists(path):
         return
     try:
@@ -108,7 +99,6 @@ def _ensure_valid_json_file(path: str):
             txt = f.read()
         if not txt.strip():
             raise ValueError("empty json")
-        # validate JSON
         import json as _json
         _json.loads(txt)
     except Exception as e:
@@ -119,8 +109,6 @@ def _ensure_valid_json_file(path: str):
         except Exception as e2:
             print(f"⚠️ Could not patch invalid JSON file: {path} ({e2})")
 
-# Best-guess path used by your intent_router (DM_PATH). If your project uses a different file name,
-# add it here too — safe no-op if missing.
 _ensure_valid_json_file(os.path.join(BASE_DIR, "intention", "domain_model.json"))
 _ensure_valid_json_file(os.path.join(BASE_DIR, "intention", "domain_model_v2.json"))
 _ensure_valid_json_file(os.path.join(BASE_DIR, "intention", "domain_model_final.json"))
@@ -161,7 +149,6 @@ try:
 except Exception as e:
     print(f"⚠️ dataset_routes import failed: {e}")
 
-# ✅ Phase 2 must be present — fail fast if it cannot import
 from intention.intent_router import router as intent_router
 app.include_router(intent_router, prefix="/intent")
 print("✅ Mounted /intent routes successfully")
@@ -181,10 +168,9 @@ def load_model():
         dlog(f"🔄 Loading CT2 model: {HF_MODEL}")
 
         # ============================================
-        # ✅ MINIMAL PATCH (Render-safe CT2 load)
+        # ✅ GOLDEN PATCH (Render-safe CT2 load)
         # - Download CT2 repo to persistent disk
-        # - Override tokenizer.json with known-good Whisper tokenizer
-        # - Load from local folder to avoid ModelWrapper parse crash
+        # - DO NOT overwrite tokenizer.json (keeps 1200 Golden banking tokens)
         # ============================================
         local_ct2_dir = os.path.join(BASE_DIR, "local_persistent", "ct2_model")
         os.makedirs(local_ct2_dir, exist_ok=True)
@@ -195,9 +181,11 @@ def load_model():
             local_dir_use_symlinks=False,
         )
 
-        # Overwrite tokenizer.json to prevent tokenizers schema crash on Render
-        good_tok = hf_hub_download("openai/whisper-base", "tokenizer.json")
-        shutil.copyfile(good_tok, os.path.join(local_ct2_dir, "tokenizer.json"))
+        # ✅ Golden integrity check
+        tok_path = os.path.join(local_ct2_dir, "tokenizer.json")
+        if not os.path.exists(tok_path):
+            raise RuntimeError("tokenizer.json missing in CT2 folder — Golden model pack incomplete")
+        print(f"✅ Golden tokenizer preserved: {tok_path} ({os.path.getsize(tok_path)} bytes)")
 
         model = WhisperModel(
             local_ct2_dir,
@@ -206,9 +194,7 @@ def load_model():
             local_files_only=True,
         )
 
-        # ✅ PATCH: expose model for routers without circular imports
         app.state.asr_model = model
-
         dlog(f"✅ CT2 model loaded successfully (device={DEVICE}, compute_type={COMPUTE_TYPE})")
     except Exception as e:
         logging.error(f"❌ Failed to load CT2 model: {e}")
@@ -272,7 +258,6 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
         except Exception as e:
             dlog(f"⚠️ pydub decode failed ({e}); trying fallback...")
             data, sr = sf.read(tmp_decode, dtype="float32", always_2d=False)
-            # NOTE: fallback kept same as your current version (no other file changes)
             audio = AudioSegment(
                 data.tobytes(),
                 frame_rate=sr,
@@ -301,14 +286,20 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
     try:
         t0 = time.perf_counter()
 
-        # -------- CT2 transcribe --------
+        # ✅ PROD PATCH (anti-stutter + Golden accuracy)
         segments, info = model.transcribe(
             wav_path,
-            language="mn",
-            beam_size=2,      # matches your HF num_beams=2 spirit
+            language="mn",            # ✅ Correct for CT2/faster-whisper
+            beam_size=5,              # ✅ Golden accuracy
             vad_filter=True,
+            repetition_penalty=1.2,   # ✅ Prevent stutter
+            no_repeat_ngram_size=3,   # ✅ Reduce loops
+            condition_on_previous_text=False,  # ✅ Big anti-repeat win on segmented decode
+            initial_prompt="Банк, данс, үлдэгдэл, гүйлгээ, шилжүүлэг, карт",
         )
+
         text = "".join(seg.text for seg in segments).strip()
+        text = " ".join(text.split())  # ✅ remove accidental double spaces
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         log_memory("After transcription")
