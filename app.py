@@ -47,7 +47,7 @@ BASE_DIR = "/opt/render/project/src" if IS_RENDER else os.getcwd()
 os.chdir(BASE_DIR)
 
 # ✅ Set this to your BetterGolden CT2 repo (FP16 or INT8)
-HF_MODEL = os.getenv("HF_MODEL", "gana1215/MN_Whisper_Base_CT2")
+HF_MODEL = os.getenv("HF_MODEL", "gana1215/WHISPER_CT2_PRODUCTION_V2_INT8")
 
 DEVICE = os.getenv("DEVICE", "cpu")               # "cpu" or "cuda"
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")  # "int8" / "int8_float16" / "float16"
