@@ -30,7 +30,9 @@ huggingface_hub==0.20.3
 torch==2.1.2
 torchaudio==2.1.2
 safetensors==0.4.2
-tokenizers==0.15.2
+#tokenizers==0.15.2
+tokenizers>=0.15.2,<0.21
+
 # --- Intent Router (Sklearn pickle exact version) ---
 joblib==1.4.2
 scikit-learn==1.6.1     # ★ FIXED: must match your pickled model version
