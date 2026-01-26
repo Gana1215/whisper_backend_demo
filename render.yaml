@@ -25,7 +25,7 @@ services:
     envVars:
       # 🔧 Model + runtime config
       - key: HF_MODEL
-        value: gana1215/MN_Whisper_Tiny_HF
+        value: WHISPER_CT2_PRODUCTION_V2_INT8
         # NOTE:
         # - If your app.py uses HF Whisper (transformers) -> set HF repo here (Tiny_HF)
         # - If your app.py uses faster-whisper CT2 -> set CT2 repo/path here (Small_CT2)
