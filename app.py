@@ -5,10 +5,11 @@
 # ✅ CT2 (faster-whisper) engine
 # ✅ GOLDEN PATCH: Render-safe CT2 load by local snapshot (NO tokenizer overwrite)
 # ✅ PROD PATCH: Anti-stutter decoding (beam=5, repetition penalty, no-repeat ngram, warm prompt)
+# ✅ NEW PROD PATCH: Cache-bust persistent CT2 folder by HF_MODEL (+ optional HF_REVISION)
 # ✅ Keeps SAME /transcribe response schema for BankAI frontend
 # ===============================================
 
-import os, tempfile, psutil, logging, time, sys
+import os, tempfile, psutil, logging, time, sys, re
 from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
@@ -48,6 +49,7 @@ os.chdir(BASE_DIR)
 
 # ✅ Set this to your BetterGolden CT2 repo (FP16 or INT8)
 HF_MODEL = os.getenv("HF_MODEL", "gana1215/WHISPER_CT2_PRODUCTION_V2_INT8")
+HF_REVISION = os.getenv("HF_REVISION", "main")  # optional pin for deterministic deploys
 
 DEVICE = os.getenv("DEVICE", "cpu")               # "cpu" or "cuda"
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")  # "int8" / "int8_float16" / "float16"
@@ -59,6 +61,7 @@ DIAG = os.getenv("DIAG", "0") == "1"
 
 print("✅ Environment configuration loaded:")
 print(f"   HF_MODEL        → {HF_MODEL} (CT2 repo/path)")
+print(f"   HF_REVISION     → {HF_REVISION}")
 print(f"   DEVICE          → {DEVICE}")
 print(f"   COMPUTE_TYPE    → {COMPUTE_TYPE}")
 print(f"   DATA_DIR        → {DATA_DIR}")
@@ -165,18 +168,22 @@ def load_model():
     global model
     log_memory("Before loading model")
     try:
-        dlog(f"🔄 Loading CT2 model: {HF_MODEL}")
+        dlog(f"🔄 Loading CT2 model: {HF_MODEL} @ {HF_REVISION}")
 
         # ============================================
         # ✅ GOLDEN PATCH (Render-safe CT2 load)
+        # ✅ NEW: Cache-bust persistent folder by model id + revision
         # - Download CT2 repo to persistent disk
         # - DO NOT overwrite tokenizer.json (keeps 1200 Golden banking tokens)
         # ============================================
-        local_ct2_dir = os.path.join(BASE_DIR, "local_persistent", "ct2_model")
+        safe_repo = re.sub(r"[^a-zA-Z0-9._-]+", "__", HF_MODEL)
+        safe_rev = re.sub(r"[^a-zA-Z0-9._-]+", "__", HF_REVISION)
+        local_ct2_dir = os.path.join(BASE_DIR, "local_persistent", f"ct2_model__{safe_repo}__{safe_rev}")
         os.makedirs(local_ct2_dir, exist_ok=True)
 
         snapshot_download(
             repo_id=HF_MODEL,
+            revision=HF_REVISION,
             local_dir=local_ct2_dir,
             local_dir_use_symlinks=False,
         )
@@ -209,6 +216,7 @@ def health():
         "msg": "Mongolian Whisper API is running.",
         "model_loaded": model is not None,
         "model_id": HF_MODEL,
+        "revision": HF_REVISION,
         "device": DEVICE,
         "compute_type": COMPUTE_TYPE,
         "archive_dir": ARCHIVE_DIR,
@@ -289,17 +297,17 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
         # ✅ PROD PATCH (anti-stutter + Golden accuracy)
         segments, info = model.transcribe(
             wav_path,
-            language="mn",            # ✅ Correct for CT2/faster-whisper
-            beam_size=5,              # ✅ Golden accuracy
+            language="mn",
+            beam_size=5,
             vad_filter=True,
-            repetition_penalty=1.2,   # ✅ Prevent stutter
-            no_repeat_ngram_size=3,   # ✅ Reduce loops
-            condition_on_previous_text=False,  # ✅ Big anti-repeat win on segmented decode
+            repetition_penalty=1.2,
+            no_repeat_ngram_size=3,
+            condition_on_previous_text=False,
             initial_prompt="Банк, данс, үлдэгдэл, гүйлгээ, шилжүүлэг, карт",
         )
 
         text = "".join(seg.text for seg in segments).strip()
-        text = " ".join(text.split())  # ✅ remove accidental double spaces
+        text = " ".join(text.split())
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         log_memory("After transcription")
