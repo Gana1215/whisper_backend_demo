@@ -24,13 +24,14 @@ sentencepiece==0.1.99
 edge-tts==6.1.12
 
 # --- HuggingFace Whisper (HF fallback mode) ---
-transformers==4.36.2
+# ✅ Aligned with Colab Golden stack (tokenizer.json parsing compatibility)
+transformers==4.49.0
 accelerate==0.25.0
-huggingface_hub==0.20.3
+huggingface_hub==0.28.0
 torch==2.1.2
 torchaudio==2.1.2
 safetensors==0.4.2
-tokenizers==0.18.1
+tokenizers==0.22.0
 
 # --- Intent Router (Sklearn pickle exact version) ---
 joblib==1.4.2
