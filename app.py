@@ -6,6 +6,7 @@
 # ✅ GOLDEN PATCH: Render-safe CT2 load by local snapshot (NO tokenizer overwrite)
 # ✅ PROD PATCH: Anti-stutter decoding (beam=5, repetition penalty, no-repeat ngram, warm prompt)
 # ✅ NEW PROD PATCH: Cache-bust persistent CT2 folder by HF_MODEL (+ optional HF_REVISION)
+# ✅ NEW FIX: ffmpeg-only decode to 16k mono WAV (removes corrupt soundfile->AudioSegment fallback)
 # ✅ Keeps SAME /transcribe response schema for BankAI frontend
 # ===============================================
 
@@ -16,8 +17,8 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from pydub import AudioSegment
-import soundfile as sf
+from pydub import AudioSegment  # kept (unchanged imports; no longer used in /transcribe)
+import soundfile as sf          # kept (unchanged imports; no longer used in /transcribe)
 
 # ✅ CT2 / faster-whisper (NO PyTorch HF)
 from faster_whisper import WhisperModel
@@ -246,50 +247,43 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File too large.")
 
-    # -------- Decode to AudioSegment --------
+    # -------- FIX: Convert to 16k mono WAV via ffmpeg (Render-safe, no corruption) --------
+    import subprocess, wave, contextlib
+
+    ext = os.path.splitext(file.filename or "")[1].lower() or ".bin"
+    tmp_in = tempfile.mktemp(suffix=ext)
+    with open(tmp_in, "wb") as f:
+        f.write(contents)
+
+    wav_path = tempfile.mktemp(suffix=".wav")
     try:
-        fmt = "wav"
-        ext = os.path.splitext(file.filename or "")[1].lower()
-        if "webm" in ct or ext == ".webm":
-            fmt = "webm"
-        elif "mp4" in ct or "m4a" in ct or ext in [".mp4", ".m4a", ".aac"]:
-            fmt = "mp4"
-        elif "ogg" in ct or ext == ".ogg":
-            fmt = "ogg"
-
-        tmp_decode = tempfile.mktemp(suffix=f".{fmt}")
-        with open(tmp_decode, "wb") as tmp:
-            tmp.write(contents)
-
-        try:
-            audio = AudioSegment.from_file(tmp_decode, format=fmt)
-        except Exception as e:
-            dlog(f"⚠️ pydub decode failed ({e}); trying fallback...")
-            data, sr = sf.read(tmp_decode, dtype="float32", always_2d=False)
-            audio = AudioSegment(
-                data.tobytes(),
-                frame_rate=sr,
-                sample_width=4,
-                channels=1 if len(getattr(data, "shape", [])) == 1 else data.shape[1],
-            )
-        finally:
-            os.remove(tmp_decode)
-
-        # Keep your canonical mobile-safe output
-        audio = audio.set_frame_rate(44100).set_channels(1).set_sample_width(2)
-        dur = len(audio) / 1000.0
-        if dur > MAX_DURATION_SEC:
-            raise HTTPException(status_code=413, detail=f"Audio too long ({dur:.1f}s).")
-
-        dlog(f"🎧 Decoded ({fmt}) → {dur:.2f}s")
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", tmp_in, "-ac", "1", "-ar", "16000", "-vn", "-f", "wav", wav_path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Audio decode failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Audio decode failed (ffmpeg): {e}")
+    finally:
+        try:
+            os.remove(tmp_in)
+        except Exception:
+            pass
 
-    # -------- Export 16k mono WAV for CT2 --------
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav16:
-        audio_16k = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-        audio_16k.export(tmp_wav16.name, format="wav")
-        wav_path = tmp_wav16.name
+    # duration check (real WAV duration)
+    try:
+        with contextlib.closing(wave.open(wav_path, "rb")) as wf:
+            dur = wf.getnframes() / float(wf.getframerate())
+    except Exception:
+        dur = None
+
+    if dur is not None and dur > MAX_DURATION_SEC:
+        try:
+            os.remove(wav_path)
+        except Exception:
+            pass
+        raise HTTPException(status_code=413, detail=f"Audio too long ({dur:.1f}s).")
 
     try:
         t0 = time.perf_counter()
