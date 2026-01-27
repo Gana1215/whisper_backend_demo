@@ -7,6 +7,8 @@
 # ✅ PROD PATCH: Anti-stutter decoding (beam=5, repetition penalty, no-repeat ngram, warm prompt)
 # ✅ NEW PROD PATCH: Cache-bust persistent CT2 folder by HF_MODEL (+ optional HF_REVISION)
 # ✅ NEW FIX: ffmpeg-only decode to 16k mono WAV (removes corrupt soundfile->AudioSegment fallback)
+# ✅ NEW GOLDEN FIX: WAV fast-path (in-memory resample) for PCM WAVs (e.g. 44.1k mono)
+# ✅ GAME CHANGER: Colab-compatible CT2 generate pipeline (FeatureExtractor + Tokenizer + prompts)
 # ✅ Keeps SAME /transcribe response schema for BankAI frontend
 # ===============================================
 
@@ -18,13 +20,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pydub import AudioSegment  # kept (unchanged imports; no longer used in /transcribe)
-import soundfile as sf          # kept (unchanged imports; no longer used in /transcribe)
+import soundfile as sf          # kept (used in WAV fast-path)
 
-# ✅ CT2 / faster-whisper (NO PyTorch HF)
+# ✅ WAV fast-path helpers
+import io
+import numpy as np
+import librosa
+
+# ✅ CT2 / faster-whisper (kept; no longer used for /transcribe in this patch)
 from faster_whisper import WhisperModel
 
 # ✅ Render-safe CT2 download
 from huggingface_hub import snapshot_download
+
+# ✅ GAME CHANGER: exact Colab pipeline
+import ctranslate2
+from transformers import WhisperTokenizer, WhisperFeatureExtractor
 
 # 🔧 --- Ensure correct import path on Render ---
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -60,12 +71,18 @@ MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))
 MAX_DURATION_SEC = float(os.getenv("MAX_DURATION_SEC", 30))
 DIAG = os.getenv("DIAG", "0") == "1"
 
+# ✅ CPU-safe decode knobs (Render/Mac). Can override in env.
+BEAM_SIZE = int(os.getenv("BEAM_SIZE", "1"))   # default fast demo
+BEST_OF = int(os.getenv("BEST_OF", "1"))
+
 print("✅ Environment configuration loaded:")
 print(f"   HF_MODEL        → {HF_MODEL} (CT2 repo/path)")
 print(f"   HF_REVISION     → {HF_REVISION}")
 print(f"   DEVICE          → {DEVICE}")
 print(f"   COMPUTE_TYPE    → {COMPUTE_TYPE}")
 print(f"   DATA_DIR        → {DATA_DIR}")
+print(f"   BEAM_SIZE       → {BEAM_SIZE}")
+print(f"   BEST_OF         → {BEST_OF}")
 
 # -------- Directories --------
 ARCHIVE_DIR = DATA_DIR if os.path.exists(DATA_DIR) else os.path.join(BASE_DIR, "local_persistent/record_archive")
@@ -161,25 +178,33 @@ print("✅ Mounted /intent routes successfully")
 app.mount("/record_archive", StaticFiles(directory=ARCHIVE_DIR), name="record_archive")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# -------- Whisper model (CT2) --------
+# -------- Models --------
+# kept (no longer used for /transcribe after game-changer patch)
 model: Optional[WhisperModel] = None
+
+# ✅ GAME CHANGER globals (Colab-compatible)
+ct2_model = None
+fe = None
+tok = None
+prompt_tokens = None
 
 @app.on_event("startup")
 def load_model():
-    global model
+    global model, ct2_model, fe, tok, prompt_tokens
     log_memory("Before loading model")
     try:
         dlog(f"🔄 Loading CT2 model: {HF_MODEL} @ {HF_REVISION}")
 
         # ============================================
         # ✅ GOLDEN PATCH (Render-safe CT2 load)
-        # ✅ NEW: Cache-bust persistent folder by model id + revision
+        # ✅ Cache-bust persistent folder by model id + revision
         # - Download CT2 repo to persistent disk
         # - DO NOT overwrite tokenizer.json (keeps 1200 Golden banking tokens)
         # ============================================
         safe_repo = re.sub(r"[^a-zA-Z0-9._-]+", "__", HF_MODEL)
         safe_rev = re.sub(r"[^a-zA-Z0-9._-]+", "__", HF_REVISION)
         local_ct2_dir = os.path.join(BASE_DIR, "local_persistent", f"ct2_model__{safe_repo}__{safe_rev}")
+
         os.makedirs(local_ct2_dir, exist_ok=True)
 
         snapshot_download(
@@ -195,6 +220,7 @@ def load_model():
             raise RuntimeError("tokenizer.json missing in CT2 folder — Golden model pack incomplete")
         print(f"✅ Golden tokenizer preserved: {tok_path} ({os.path.getsize(tok_path)} bytes)")
 
+        # kept for compatibility / future fallback (not used by /transcribe)
         model = WhisperModel(
             local_ct2_dir,
             device=DEVICE,
@@ -202,7 +228,25 @@ def load_model():
             local_files_only=True,
         )
 
+        # ✅ GAME CHANGER: Colab-compatible pipeline loads
+        fe = WhisperFeatureExtractor.from_pretrained(local_ct2_dir)
+        tok = WhisperTokenizer.from_pretrained(local_ct2_dir)
+        tok.set_prefix_tokens(language="Mongolian", task="transcribe")
+        prompt_tokens = tok.prefix_tokens
+
+        ct2_model = ctranslate2.models.Whisper(
+            local_ct2_dir,
+            device=DEVICE,
+            compute_type=COMPUTE_TYPE,
+        )
+
         app.state.asr_model = model
+        app.state.ct2_model = ct2_model
+        app.state.fe = fe
+        app.state.tok = tok
+        app.state.prompt_tokens = prompt_tokens
+
+        print("✅ CT2 generate engine ready (Colab-compatible pipeline)")
         dlog(f"✅ CT2 model loaded successfully (device={DEVICE}, compute_type={COMPUTE_TYPE})")
     except Exception as e:
         logging.error(f"❌ Failed to load CT2 model: {e}")
@@ -216,6 +260,7 @@ def health():
         "ok": True,
         "msg": "Mongolian Whisper API is running.",
         "model_loaded": model is not None,
+        "ct2_generate_ready": ct2_model is not None,
         "model_id": HF_MODEL,
         "revision": HF_REVISION,
         "device": DEVICE,
@@ -232,10 +277,25 @@ class TranscribeResult(BaseModel):
     time_ms: Optional[float] = None
     playback_path: Optional[str] = None
 
+# ✅ WAV fast-path (in-memory resample to 16k mono float32)
+def _fast_wav_to_float32_16k(contents: bytes):
+    data, sr = sf.read(io.BytesIO(contents), dtype="float32", always_2d=False)
+
+    # stereo -> mono
+    if isinstance(data, np.ndarray) and data.ndim == 2:
+        data = np.mean(data, axis=1)
+
+    data = np.asarray(data, dtype=np.float32)
+
+    if sr != 16000:
+        data = librosa.resample(data, orig_sr=sr, target_sr=16000, res_type="kaiser_fast")
+
+    return data, 16000
+
 # -------- Main inference --------
 @app.post("/transcribe", response_model=TranscribeResult)
 async def transcribe(request: Request, file: UploadFile = File(...), device: Optional[str] = Form(None)):
-    if model is None:
+    if ct2_model is None or fe is None or tok is None or prompt_tokens is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
     log_memory("Before transcription")
@@ -247,65 +307,81 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File too large.")
 
-    # -------- FIX: Convert to 16k mono WAV via ffmpeg (Render-safe, no corruption) --------
-    import subprocess, wave, contextlib
+    # ✅ Detect WAV (your Zulaa files are PCM WAV 44.1k mono)
+    is_wav = (file.filename or "").lower().endswith(".wav") or "wav" in ct
 
-    ext = os.path.splitext(file.filename or "")[1].lower() or ".bin"
-    tmp_in = tempfile.mktemp(suffix=ext)
-    with open(tmp_in, "wb") as f:
-        f.write(contents)
-
-    wav_path = tempfile.mktemp(suffix=".wav")
+    # ---------- Prepare audio -> float32 mono 16k ----------
+    wav_path = None
     try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", tmp_in, "-ac", "1", "-ar", "16000", "-vn", "-f", "wav", wav_path],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Audio decode failed (ffmpeg): {e}")
-    finally:
-        try:
-            os.remove(tmp_in)
-        except Exception:
-            pass
+        if is_wav:
+            audio, _ = _fast_wav_to_float32_16k(contents)
+            dur = float(len(audio)) / 16000.0
+        else:
+            # NON-WAV: Convert to 16k mono WAV via ffmpeg (Render-safe)
+            import subprocess, wave, contextlib
 
-    # duration check (real WAV duration)
-    try:
-        with contextlib.closing(wave.open(wav_path, "rb")) as wf:
-            dur = wf.getnframes() / float(wf.getframerate())
-    except Exception:
-        dur = None
+            ext = os.path.splitext(file.filename or "")[1].lower() or ".bin"
+            tmp_in = tempfile.mktemp(suffix=ext)
+            with open(tmp_in, "wb") as f:
+                f.write(contents)
 
-    if dur is not None and dur > MAX_DURATION_SEC:
-        try:
-            os.remove(wav_path)
-        except Exception:
-            pass
-        raise HTTPException(status_code=413, detail=f"Audio too long ({dur:.1f}s).")
+            wav_path = tempfile.mktemp(suffix=".wav")
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", tmp_in, "-ac", "1", "-ar", "16000", "-vn", "-f", "wav", wav_path],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Audio decode failed (ffmpeg): {e}")
+            finally:
+                try:
+                    os.remove(tmp_in)
+                except Exception:
+                    pass
 
-    try:
+            # duration check (real WAV duration)
+            try:
+                with contextlib.closing(wave.open(wav_path, "rb")) as wf:
+                    dur = wf.getnframes() / float(wf.getframerate())
+            except Exception:
+                dur = None
+
+            # load wav to float32
+            try:
+                with open(wav_path, "rb") as f:
+                    wav_bytes = f.read()
+                audio, _ = _fast_wav_to_float32_16k(wav_bytes)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"WAV load failed: {e}")
+
+        if dur is not None and dur > MAX_DURATION_SEC:
+            raise HTTPException(status_code=413, detail=f"Audio too long ({dur:.1f}s).")
+
+        # ---------- GAME CHANGER: Colab-compatible CT2 generate ----------
         t0 = time.perf_counter()
 
-        # ✅ PROD PATCH (anti-stutter + Golden accuracy)
-        segments, info = model.transcribe(
-            wav_path,
-            language="mn",
-            beam_size=5,
-            vad_filter=True,
-            repetition_penalty=1.2,
-            no_repeat_ngram_size=3,
-            condition_on_previous_text=False,
-            initial_prompt="Банк, данс, үлдэгдэл, гүйлгээ, шилжүүлэг, карт",
-        )
+        feats_t0 = time.perf_counter()
+        feats = fe(audio, sampling_rate=16000, return_tensors="np").input_features.astype(np.float32)
+        s_view = ctranslate2.StorageView.from_array(feats)
+        prep_ms = (time.perf_counter() - feats_t0) * 1000
 
-        text = "".join(seg.text for seg in segments).strip()
+        gen_t0 = time.perf_counter()
+        out = ct2_model.generate(
+            s_view,
+            prompts=[prompt_tokens],
+            beam_size=BEAM_SIZE,
+            repetition_penalty=1.2,
+        )
+        infer_ms = (time.perf_counter() - gen_t0) * 1000
+
+        text = tok.batch_decode([out[0].sequences_ids[0]], skip_special_tokens=True)[0].strip()
         text = " ".join(text.split())
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         log_memory("After transcription")
-        dlog(f"✅ CT2 inference done ({elapsed_ms:.1f} ms)")
+        dlog(f"✅ CT2 generate done total={elapsed_ms:.1f} ms (prep={prep_ms:.1f} ms infer={infer_ms:.1f} ms)")
 
         return TranscribeResult(
             user_text=text,
@@ -315,8 +391,11 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
             playback_path=None,
         )
     finally:
-        if os.path.exists(wav_path):
-            os.remove(wav_path)
+        if wav_path and os.path.exists(wav_path):
+            try:
+                os.remove(wav_path)
+            except Exception:
+                pass
             dlog(f"🧹 Temp removed: {wav_path}")
 
 # -------- Entrypoint --------
@@ -325,4 +404,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     logging.info(f"🚀 Starting server on port {port} (DIAG={'ON' if DIAG else 'OFF'})")
     uvicorn.run("app:app", host="0.0.0.0", port=port, log_level="info" if DIAG else "warning")
-#
