@@ -10,6 +10,10 @@
 # ✅ NEW GOLDEN FIX: WAV fast-path (in-memory resample) for PCM WAVs (e.g. 44.1k mono)
 # ✅ GAME CHANGER: Colab-compatible CT2 generate pipeline (FeatureExtractor + Tokenizer + prompts)
 # ✅ Keeps SAME /transcribe response schema for BankAI frontend
+#
+# ✅ GAME-CHANGER HARDENING (NO OTHER LOGIC TOUCHED):
+# - If filename says ".wav" but bytes are actually webm/ogg/mp3 → WAV fast-path fails → fallback to ffmpeg safely
+# - File upload remains flexible: mp3/m4a/webm/ogg/wav all accepted (audio/* or octet-stream)
 # ===============================================
 
 import os, tempfile, psutil, logging, time, sys, re
@@ -307,17 +311,28 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File too large.")
 
-    # ✅ Detect WAV (your Zulaa files are PCM WAV 44.1k mono)
-    is_wav = (file.filename or "").lower().endswith(".wav") or "wav" in ct
+    # ✅ Heuristic WAV detection (may be wrong if frontend sends voice.wav but blob is webm/ogg)
+    is_wav_hint = (file.filename or "").lower().endswith(".wav") or "wav" in ct
 
     # ---------- Prepare audio -> float32 mono 16k ----------
     wav_path = None
     try:
-        if is_wav:
-            audio, _ = _fast_wav_to_float32_16k(contents)
-            dur = float(len(audio)) / 16000.0
-        else:
-            # NON-WAV: Convert to 16k mono WAV via ffmpeg (Render-safe)
+        audio = None
+        dur = None
+
+        # --- Attempt WAV fast-path if it looks like WAV ---
+        if is_wav_hint:
+            try:
+                audio, _ = _fast_wav_to_float32_16k(contents)
+                dur = float(len(audio)) / 16000.0
+            except Exception as e:
+                # ✅ GAME-CHANGER hardening: fake-wav fallback → ffmpeg
+                dlog(f"⚠️ WAV fast-path failed, fallback to ffmpeg: {e}")
+                audio = None
+                dur = None
+
+        # --- If not WAV or WAV fast-path failed → ffmpeg convert ---
+        if audio is None:
             import subprocess, wave, contextlib
 
             ext = os.path.splitext(file.filename or "")[1].lower() or ".bin"
@@ -353,6 +368,8 @@ async def transcribe(request: Request, file: UploadFile = File(...), device: Opt
                 with open(wav_path, "rb") as f:
                     wav_bytes = f.read()
                 audio, _ = _fast_wav_to_float32_16k(wav_bytes)
+                if dur is None:
+                    dur = float(len(audio)) / 16000.0
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"WAV load failed: {e}")
 

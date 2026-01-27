@@ -18,6 +18,10 @@
 # ✅ GAME-CHANGER PATCH (NO OTHER LOGIC TOUCHED):
 # 5) /voice_intent uses SAME STT pipeline as /transcribe (WAV fast-path + in-memory resample)
 #    → fixes Render wrong transcription + slow decode
+#
+# ✅ EXTRA GAME-CHANGER HARDENING (STILL STT-ONLY; NO OTHER LOGIC TOUCHED):
+# - Detect “fake wav” (filename says .wav but data is webm/ogg) and fallback to ffmpeg safely
+# - Accept mp3/m4a/webm/ogg/etc and convert via ffmpeg to 16k mono wav
 # ===============================================
 
 import os, csv, json, time, re, subprocess, shlex
@@ -26,7 +30,7 @@ from typing import Dict, Any, Optional, List, Tuple
 from fastapi import APIRouter, UploadFile, File, Form
 from pydantic import BaseModel
 import joblib
-from pydub import AudioSegment
+from pydub import AudioSegment  # (kept for compatibility; not used in game-changer path)
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from intention.entity_extractor import extract_entities
@@ -470,29 +474,88 @@ def classify_intent(text: str = Form(...)):
 # =========================================================
 # ✅ GAME-CHANGER STT helper (used ONLY by /voice_intent)
 # - Reads upload bytes
-# - WAV fast-path using soundfile + librosa(resampy)
-# - Otherwise fallback to ffmpeg conversion (same behavior as app.py non-wav path)
+# - WAV fast-path using soundfile + librosa(resample)
+# - Otherwise fallback to ffmpeg conversion (mp3/m4a/webm/ogg/etc)
+# - Hardened against “fake wav”
 # =========================================================
-def _stt_gamechanger_from_upload(contents: bytes, filename: str, content_type: str, model, dlog=None) -> Tuple[str, float]:
+def _stt_gamechanger_from_upload(
+    contents: bytes,
+    filename: str,
+    content_type: str,
+    model,
+    dlog=None
+) -> Tuple[str, float]:
+
+    fn = (filename or "audio").lower()
     ct = (content_type or "").lower()
-    is_wav = (filename or "").lower().endswith(".wav") or ("wav" in ct)
 
-    # Tune knobs exactly like your Game-Changer app.py defaults
-    BEAM_SIZE = int(os.getenv("BEAM_SIZE", "1"))
-    BEST_OF   = int(os.getenv("BEST_OF", "1"))
+    # Render/Browser sometimes lies: filename endswith .wav but blob is webm/ogg.
+    # We try WAV fast-path, and if soundfile fails → fallback to ffmpeg.
+    def _try_wav_fastpath() -> Optional[Tuple[str, float]]:
+        try:
+            data, sr = sf.read(io.BytesIO(contents), dtype="float32", always_2d=False)
+            if isinstance(data, np.ndarray) and data.ndim == 2:
+                data = np.mean(data, axis=1)
+            if sr != 16000:
+                data = librosa.resample(data, orig_sr=sr, target_sr=16000)
+            audio = np.asarray(data, dtype=np.float32)
+            dur = float(len(audio)) / 16000.0
 
-    # ---------- WAV fast-path ----------
-    if is_wav:
-        data, sr = sf.read(io.BytesIO(contents), dtype="float32", always_2d=False)
-        if isinstance(data, np.ndarray) and data.ndim == 2:
-            data = np.mean(data, axis=1)
-        if sr != 16000:
-            data = librosa.resample(data, orig_sr=sr, target_sr=16000)
-        audio = np.asarray(data, dtype=np.float32)
-        dur = float(len(audio)) / 16000.0
+            BEAM_SIZE = int(os.getenv("BEAM_SIZE", "1"))
+            BEST_OF   = int(os.getenv("BEST_OF", "1"))
+
+            segs, _ = model.transcribe(
+                audio,
+                language="mn",
+                beam_size=BEAM_SIZE,
+                best_of=BEST_OF,
+                vad_filter=True,
+                repetition_penalty=1.1 if BEAM_SIZE == 1 else 1.2,
+                no_repeat_ngram_size=2 if BEAM_SIZE == 1 else 3,
+                condition_on_previous_text=False,
+                initial_prompt="Банк, данс, үлдэгдэл, гүйлгээ, шилжүүлэг, карт",
+            )
+            text = " ".join(("".join(s.text for s in segs)).strip().split())
+            return text, dur
+        except Exception as e:
+            dlog and dlog(f"⚠️ WAV fast-path failed (will ffmpeg fallback): {e}")
+            return None
+
+    # Heuristic: try wav fastpath if filename/content-type suggests wav
+    looks_wav = fn.endswith(".wav") or ("wav" in ct)
+    if looks_wav:
+        got = _try_wav_fastpath()
+        if got:
+            return got
+
+    # ---------- Non-wav (or failed wav) fallback: ffmpeg convert to 16k wav ----------
+    import tempfile
+
+    ext = os.path.splitext(fn)[1] or ".bin"
+    tmp_in = tempfile.mktemp(suffix=ext)
+    with open(tmp_in, "wb") as f:
+        f.write(contents)
+
+    wav_out = tempfile.mktemp(suffix=".wav")
+
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", tmp_in, "-ac", "1", "-ar", "16000", "-vn", "-f", "wav", wav_out],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # duration from wav header (cheap)
+        import wave, contextlib
+        with contextlib.closing(wave.open(wav_out, "rb")) as wf:
+            dur = wf.getnframes() / float(wf.getframerate())
+
+        BEAM_SIZE = int(os.getenv("BEAM_SIZE", "1"))
+        BEST_OF   = int(os.getenv("BEST_OF", "1"))
 
         segs, _ = model.transcribe(
-            audio,
+            wav_out,
             language="mn",
             beam_size=BEAM_SIZE,
             best_of=BEST_OF,
@@ -503,40 +566,8 @@ def _stt_gamechanger_from_upload(contents: bytes, filename: str, content_type: s
             initial_prompt="Банк, данс, үлдэгдэл, гүйлгээ, шилжүүлэг, карт",
         )
         text = " ".join(("".join(s.text for s in segs)).strip().split())
-        return text, dur
-
-    # ---------- Non-wav fallback: ffmpeg convert to 16k wav ----------
-    import tempfile
-    tmp_in = tempfile.mktemp(suffix=os.path.splitext(filename or "")[1].lower() or ".bin")
-    with open(tmp_in, "wb") as f:
-        f.write(contents)
-
-    wav_out = tempfile.mktemp(suffix=".wav")
-    try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", tmp_in, "-ac", "1", "-ar", "16000", "-vn", "-f", "wav", wav_out],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        # measure duration from wav header (cheap)
-        import wave, contextlib
-        with contextlib.closing(wave.open(wav_out, "rb")) as wf:
-            dur = wf.getnframes() / float(wf.getframerate())
-
-        segs, _ = model.transcribe(
-            wav_out,
-            language="mn",
-            beam_size=BEAM_SIZE if BEAM_SIZE else 5,
-            best_of=BEST_OF,
-            vad_filter=True,
-            repetition_penalty=1.1 if BEAM_SIZE == 1 else 1.2,
-            no_repeat_ngram_size=2 if BEAM_SIZE == 1 else 3,
-            condition_on_previous_text=False,
-            initial_prompt="Банк, данс, үлдэгдэл, гүйлгээ, шилжүүлэг, карт",
-        )
-        text = " ".join(("".join(s.text for s in segs)).strip().split())
         return text, float(dur)
+
     finally:
         try: os.remove(tmp_in)
         except Exception: pass
@@ -555,13 +586,14 @@ async def classify_from_voice(user_id: str = Form(...), file: UploadFile = File(
     # ✅ Read upload bytes once (no temp .tmp + no AudioSegment)
     contents = await file.read()
 
-    from app import model  # keep existing import style
+    # ✅ keep existing import style (as you requested)
+    from app import model
 
     # ✅ STT timing only (Game-Changer STT path)
     t_stt0 = time.perf_counter()
     text, _dur = _stt_gamechanger_from_upload(
         contents=contents,
-        filename=file.filename or "audio.wav",
+        filename=file.filename or "audio",
         content_type=file.content_type or "",
         model=model,
         dlog=dlog,
@@ -710,14 +742,3 @@ def list_intents():
         dlog("⚠️ dump failed:", e)
 
     return payload
-#This was a huge multi-day frontend + backend refactor:
-
-# ✔ Dynamic clarify
-# ✔ Dynamic domain_model
-# ✔ Static MP3/WAV auto-resolver
-# ✔ Timing overlay front/back
-# ✔ WebGPU + WASM stable
-# ✔ Clean UX + toggles
-# ✔ Scrollable chat
-# ✔ Production-ready hooks
-# # ✔ Zero regressions
