@@ -14,6 +14,10 @@
 #
 # ✅ NEW SURGICAL PATCH (NO OTHER LOGIC TOUCHED):
 # 4) /voice_intent returns timing fields + user_text for demo (stt_ms/processing_ms/total_ms)
+#
+# ✅ GAME-CHANGER PATCH (NO OTHER LOGIC TOUCHED):
+# 5) /voice_intent uses SAME STT pipeline as /transcribe (WAV fast-path + in-memory resample)
+#    → fixes Render wrong transcription + slow decode
 # ===============================================
 
 import os, csv, json, time, re, subprocess, shlex
@@ -26,6 +30,11 @@ from pydub import AudioSegment
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from intention.entity_extractor import extract_entities
+
+# ✅ GAME-CHANGER STT deps (same as app.py fast-path)
+import io
+import soundfile as sf
+import librosa
 
 # =========================================================
 # 🎧 Smart Static Voice Reply — MP3 → WAV fallback
@@ -459,6 +468,82 @@ def classify_intent(text: str = Form(...)):
     return IntentResponse(**result)
 
 # =========================================================
+# ✅ GAME-CHANGER STT helper (used ONLY by /voice_intent)
+# - Reads upload bytes
+# - WAV fast-path using soundfile + librosa(resampy)
+# - Otherwise fallback to ffmpeg conversion (same behavior as app.py non-wav path)
+# =========================================================
+def _stt_gamechanger_from_upload(contents: bytes, filename: str, content_type: str, model, dlog=None) -> Tuple[str, float]:
+    ct = (content_type or "").lower()
+    is_wav = (filename or "").lower().endswith(".wav") or ("wav" in ct)
+
+    # Tune knobs exactly like your Game-Changer app.py defaults
+    BEAM_SIZE = int(os.getenv("BEAM_SIZE", "1"))
+    BEST_OF   = int(os.getenv("BEST_OF", "1"))
+
+    # ---------- WAV fast-path ----------
+    if is_wav:
+        data, sr = sf.read(io.BytesIO(contents), dtype="float32", always_2d=False)
+        if isinstance(data, np.ndarray) and data.ndim == 2:
+            data = np.mean(data, axis=1)
+        if sr != 16000:
+            data = librosa.resample(data, orig_sr=sr, target_sr=16000)
+        audio = np.asarray(data, dtype=np.float32)
+        dur = float(len(audio)) / 16000.0
+
+        segs, _ = model.transcribe(
+            audio,
+            language="mn",
+            beam_size=BEAM_SIZE,
+            best_of=BEST_OF,
+            vad_filter=True,
+            repetition_penalty=1.1 if BEAM_SIZE == 1 else 1.2,
+            no_repeat_ngram_size=2 if BEAM_SIZE == 1 else 3,
+            condition_on_previous_text=False,
+            initial_prompt="Банк, данс, үлдэгдэл, гүйлгээ, шилжүүлэг, карт",
+        )
+        text = " ".join(("".join(s.text for s in segs)).strip().split())
+        return text, dur
+
+    # ---------- Non-wav fallback: ffmpeg convert to 16k wav ----------
+    import tempfile
+    tmp_in = tempfile.mktemp(suffix=os.path.splitext(filename or "")[1].lower() or ".bin")
+    with open(tmp_in, "wb") as f:
+        f.write(contents)
+
+    wav_out = tempfile.mktemp(suffix=".wav")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", tmp_in, "-ac", "1", "-ar", "16000", "-vn", "-f", "wav", wav_out],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # measure duration from wav header (cheap)
+        import wave, contextlib
+        with contextlib.closing(wave.open(wav_out, "rb")) as wf:
+            dur = wf.getnframes() / float(wf.getframerate())
+
+        segs, _ = model.transcribe(
+            wav_out,
+            language="mn",
+            beam_size=BEAM_SIZE if BEAM_SIZE else 5,
+            best_of=BEST_OF,
+            vad_filter=True,
+            repetition_penalty=1.1 if BEAM_SIZE == 1 else 1.2,
+            no_repeat_ngram_size=2 if BEAM_SIZE == 1 else 3,
+            condition_on_previous_text=False,
+            initial_prompt="Банк, данс, үлдэгдэл, гүйлгээ, шилжүүлэг, карт",
+        )
+        text = " ".join(("".join(s.text for s in segs)).strip().split())
+        return text, float(dur)
+    finally:
+        try: os.remove(tmp_in)
+        except Exception: pass
+        try: os.remove(wav_out)
+        except Exception: pass
+
+# =========================================================
 # 🔹 /voice_intent (PATCHED: timings + user_text, NO other logic touched)
 # =========================================================
 @router.post("/voice_intent", response_model=IntentResponse)
@@ -467,26 +552,20 @@ async def classify_from_voice(user_id: str = Form(...), file: UploadFile = File(
 
     t_total0 = time.perf_counter()
 
-    wav_dir = os.path.join(ARCHIVE_DIR, "wavs")
-    os.makedirs(wav_dir, exist_ok=True)
-    fname = f"int{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
-    tmp = f"{fname}.tmp"
+    # ✅ Read upload bytes once (no temp .tmp + no AudioSegment)
+    contents = await file.read()
 
-    with open(tmp, "wb") as t:
-        t.write(await file.read())
+    from app import model  # keep existing import style
 
-    audio = AudioSegment.from_file(tmp)
-    os.remove(tmp)
-
-    path = os.path.join(wav_dir, fname)
-    audio.set_frame_rate(44100).set_channels(1).set_sample_width(2).export(path, format="wav")
-
-    from app import model
-
-    # ✅ STT timing only
+    # ✅ STT timing only (Game-Changer STT path)
     t_stt0 = time.perf_counter()
-    segs, _ = model.transcribe(path, language="mn", task="transcribe", vad_filter=True)
-    text = "".join(s.text for s in segs).strip()
+    text, _dur = _stt_gamechanger_from_upload(
+        contents=contents,
+        filename=file.filename or "audio.wav",
+        content_type=file.content_type or "",
+        model=model,
+        dlog=dlog,
+    )
     t_stt1 = time.perf_counter()
     dlog(f"🎧 Transcribed → {text}")
 
