@@ -37,6 +37,7 @@ tokenizers==0.21.4
 # --- Intent Router (Sklearn pickle exact version) ---
 joblib==1.4.2
 scikit-learn==1.6.1     # ★ FIXED: must match your pickled model version
+httpx>=0.24.0
 
 # --- Phase 2A Faster-Whisper (CT2 backend STT) ---
 faster-whisper==1.0.3   # ★ REQUIRED: removes ModuleNotFoundError
@@ -46,3 +47,4 @@ ctranslate2==4.4.0      # ★ REQUIRED: GPU/CPU safe, works on Render CPU
 librosa==0.10.1         # ★ Needed for feature extractor + resampler
 resampy==0.4.3          # ★ Needed by librosa.resample (your crash)
 numba==0.58.1           # ★ Safe dependency for resampy on Render
+llvmlite==0.41.1

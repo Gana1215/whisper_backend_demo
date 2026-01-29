@@ -21,6 +21,13 @@
 #
 # Env:
 #   TEXT_ARCHIVE_MODE=csv   (default) | files
+#
+# ✅ TEST-ONLY AUTO TEMPO PATCH (easy to remove later)
+#   INTENT_ATEMPO_ENABLE=1  -> enable
+#   INTENT_ATEMPO_AUTO=1    -> auto pick (default)
+#   FAST_SPEECH_ONSETS_PER_SEC=7.0
+#   VERYFAST_SPEECH_ONSETS_PER_SEC=9.0
+#   (If AUTO=0, you can use INTENT_ATEMPO=0.9 as fixed tempo.)
 # ===============================================
 
 import os
@@ -270,7 +277,9 @@ def _convert_and_save_wav_16k_mono_pcm16(
             w.write(wav_bytes)
 
         if diag:
-            print(f"💾 [INTENTION_ARCHIVE] saved 16k PCM16 WAV → {final_path} ({len(wav_bytes)} bytes)")
+            print(
+                f"💾 [INTENTION_ARCHIVE] saved 16k PCM16 WAV → {final_path} ({len(wav_bytes)} bytes)"
+            )
 
     except Exception as e:
         if diag:
@@ -285,6 +294,171 @@ def _convert_and_save_wav_16k_mono_pcm16(
 
 
 # =====================================================
+# ✅ TEST-ONLY: AUTO TEMPO (easy remove later)
+# -----------------------------------------------------
+# If speech is too fast, slow it slightly BEFORE /transcribe:
+#   - normal speech      -> tempo = 1.0 (skip)
+#   - fast speech        -> tempo = 0.9
+#   - very fast speech   -> tempo = 0.8
+#
+# EASY REMOVE:
+#   - Set INTENT_ATEMPO_ENABLE=0, OR
+#   - Delete/comment the "AUTO TEMPO" section + block in _stt_via_locked_transcribe
+#
+# Env:
+#   INTENT_ATEMPO_ENABLE=1  -> enable patch
+#   INTENT_ATEMPO_AUTO=1    -> auto pick tempo (default)
+#   FAST_SPEECH_ONSETS_PER_SEC=7.0
+#   VERYFAST_SPEECH_ONSETS_PER_SEC=9.0
+#   (If AUTO=0, use INTENT_ATEMPO as fixed tempo.)
+# =====================================================
+ATEMPO_ENABLE = os.getenv("INTENT_ATEMPO_ENABLE", "0") == "1"
+ATEMPO_AUTO = os.getenv("INTENT_ATEMPO_AUTO", "1") == "1"  # default auto
+ATEMPO_VALUE = os.getenv("INTENT_ATEMPO", "0.9").strip()   # used only if AUTO=0
+
+FAST_SPEECH_ONSETS_PER_SEC = float(os.getenv("FAST_SPEECH_ONSETS_PER_SEC", "7.0"))
+VERYFAST_SPEECH_ONSETS_PER_SEC = float(os.getenv("VERYFAST_SPEECH_ONSETS_PER_SEC", "9.0"))
+
+
+def _apply_atempo_to_audio_bytes(
+    *,
+    raw_bytes: bytes,
+    orig_filename: str,
+    tempo: str = "0.9",
+    diag: bool = False,
+) -> bytes:
+    """
+    TEST ONLY:
+    Runs ffmpeg: -filter:a "atempo=<tempo>" and outputs WAV.
+    Returns NEW bytes if successful; otherwise returns original bytes.
+
+    NOTE:
+    - This adds a small preprocessing cost (usually ~10-200ms).
+    - Output is WAV container; /transcribe already accepts wav.
+    """
+    if not raw_bytes:
+        return raw_bytes
+
+    tmp_in = None
+    tmp_out = None
+    try:
+        ext = os.path.splitext(orig_filename or "")[1].lower() or ".bin"
+        tmp_in = tempfile.mktemp(suffix=ext)
+        tmp_out = tempfile.mktemp(suffix=".wav")
+
+        with open(tmp_in, "wb") as f:
+            f.write(raw_bytes)
+
+        # ffmpeg atempo -> output WAV (keep it simple)
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                tmp_in,
+                "-filter:a",
+                f"atempo={tempo}",
+                "-vn",
+                "-f",
+                "wav",
+                tmp_out,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        with open(tmp_out, "rb") as r:
+            out_bytes = r.read()
+
+        if diag:
+            print(
+                f"🧪 [ATEMPO] applied atempo={tempo} bytes_in={len(raw_bytes)} bytes_out={len(out_bytes)}"
+            )
+
+        return out_bytes or raw_bytes
+
+    except Exception as e:
+        if diag:
+            print(f"⚠️ [ATEMPO] failed (tempo={tempo}) fallback original: {type(e).__name__}: {e}")
+        return raw_bytes
+    finally:
+        for p in (tmp_in, tmp_out):
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
+
+def _pick_tempo_simple_from_audio_bytes(
+    *,
+    raw_bytes: bytes,
+    orig_filename: str,
+    diag: bool = False,
+) -> float:
+    """
+    Simple audio-only speed check (no transcription):
+      - load audio at 16k mono
+      - estimate voiced (non-silent) seconds
+      - compute onset events / voiced second (proxy for speed)
+    Returns tempo: 1.0, 0.9, or 0.8
+    """
+    if not raw_bytes:
+        return 1.0
+
+    tmp_in = None
+    try:
+        import librosa
+
+        ext = os.path.splitext(orig_filename or "")[1].lower() or ".bin"
+        tmp_in = tempfile.mktemp(suffix=ext)
+        with open(tmp_in, "wb") as f:
+            f.write(raw_bytes)
+
+        # Load as mono 16k
+        y, sr = librosa.load(tmp_in, sr=16000, mono=True)
+        dur = float(len(y) / sr) if sr else 0.0
+        if dur < 0.5:
+            return 1.0  # too short to judge
+
+        # Estimate voiced duration (non-silent)
+        intervals = librosa.effects.split(y, top_db=30)
+        voiced_sec = float(sum((e - s) for s, e in intervals) / sr) if len(intervals) else dur
+        voiced_sec = max(0.001, voiced_sec)
+
+        # Onset rate (proxy for speed)
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr)
+        onset_rate = float(len(onsets) / voiced_sec)
+
+        if diag:
+            print(
+                f"🧪 [AUTO_TEMPO] dur={dur:.2f}s voiced={voiced_sec:.2f}s "
+                f"onsets={len(onsets)} rate={onset_rate:.2f}/s "
+                f"(fast>={FAST_SPEECH_ONSETS_PER_SEC}, vfast>={VERYFAST_SPEECH_ONSETS_PER_SEC})"
+            )
+
+        if onset_rate >= VERYFAST_SPEECH_ONSETS_PER_SEC:
+            return 0.8
+        if onset_rate >= FAST_SPEECH_ONSETS_PER_SEC:
+            return 0.9
+        return 1.0
+
+    except Exception as e:
+        if diag:
+            print(f"⚠️ [AUTO_TEMPO] check failed → fallback 1.0: {type(e).__name__}: {e}")
+        return 1.0
+
+    finally:
+        if tmp_in and os.path.exists(tmp_in):
+            try:
+                os.remove(tmp_in)
+            except Exception:
+                pass
+
+
+# =====================================================
 # ✅ Single STT source: call LOCKED app.py /transcribe in-process
 # =====================================================
 async def _stt_via_locked_transcribe(request: Request, file: UploadFile) -> dict:
@@ -292,10 +466,49 @@ async def _stt_via_locked_transcribe(request: Request, file: UploadFile) -> dict
     ✅ Single source of truth for STT:
     Call LOCKED app.py /transcribe IN-PROCESS (no network hop).
     ✅ Compatible with older/newer httpx via ASGITransport.
+
+    ✅ TEST ONLY (easy delete):
+    If INTENT_ATEMPO_ENABLE=1, we optionally preprocess with auto-picked tempo before calling /transcribe.
     """
     b = await file.read()
     if not b:
         raise HTTPException(status_code=400, detail="Empty audio file")
+
+    # Keep original bytes for archive
+    orig_b = b
+
+    # ===========================
+    # 🧪 TEST-ONLY AUTO TEMPO PATCH (easy remove later)
+    # ===========================
+    if ATEMPO_ENABLE:
+        tempo = 1.0
+
+        if ATEMPO_AUTO:
+            tempo = _pick_tempo_simple_from_audio_bytes(
+                raw_bytes=b,
+                orig_filename=file.filename or "audio.wav",
+                diag=ENV_DIAG,
+            )
+        else:
+            try:
+                tempo = float(ATEMPO_VALUE or "1.0")
+            except Exception:
+                tempo = 1.0
+
+        if tempo < 0.999:
+            t0 = time.perf_counter()
+            b = _apply_atempo_to_audio_bytes(
+                raw_bytes=b,
+                orig_filename=file.filename or "audio.wav",
+                tempo=str(tempo),
+                diag=ENV_DIAG,
+            )
+            if ENV_DIAG:
+                print(f"🧪 [AUTO_TEMPO] applied tempo={tempo} preprocess_ms={(time.perf_counter() - t0)*1000:.1f}")
+        else:
+            if ENV_DIAG:
+                print("🧪 [AUTO_TEMPO] tempo=1.0 → skipped")
+    # ===========================
 
     try:
         transport = httpx.ASGITransport(app=request.app)
@@ -329,8 +542,8 @@ async def _stt_via_locked_transcribe(request: Request, file: UploadFile) -> dict
     if not (j.get("user_text") or "").strip():
         raise HTTPException(status_code=400, detail="STT produced empty transcript")
 
-    # IMPORTANT: return transcript + also the original bytes so caller can archive async
-    j["_raw_bytes"] = b
+    # IMPORTANT: archive ORIGINAL bytes (not tempo-modified)
+    j["_raw_bytes"] = orig_b
     j["_orig_filename"] = file.filename or "audio.wav"
     return j
 
@@ -386,7 +599,6 @@ async def voice_intent(
         t_total1 = time.perf_counter()
 
         # ---- Async archive in parallel (NO impact to timing fields) ----
-        # 1) save normalized WAV 16k mono PCM16
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         out_wav_name = f"int{user_id}_{ts}.wav"
         raw_bytes = stt_json.get("_raw_bytes") or b""
@@ -400,7 +612,6 @@ async def voice_intent(
             diag=ENV_DIAG,
         )
 
-        # 2) append metadata row (voice)
         background_tasks.add_task(
             _append_metadata_row,
             user_id=user_id,
