@@ -28,6 +28,10 @@
 #   FAST_SPEECH_ONSETS_PER_SEC=7.0
 #   VERYFAST_SPEECH_ONSETS_PER_SEC=9.0
 #   (If AUTO=0, you can use INTENT_ATEMPO=0.9 as fixed tempo.)
+#
+# ✅ NEW PATCH:
+#   transfer_money intent returns START PROMPT + transfer_start.mp3
+#   (prevents premature "transfer_success" response)
 # ===============================================
 
 import os
@@ -244,9 +248,6 @@ def _convert_and_save_wav_16k_mono_pcm16(
             f.write(raw_bytes)
 
         # ffmpeg -> 16k mono PCM16 wav
-        # -ac 1: mono
-        # -ar 16000: 16k
-        # -sample_fmt s16: PCM16
         subprocess.run(
             [
                 "ffmpeg",
@@ -294,23 +295,33 @@ def _convert_and_save_wav_16k_mono_pcm16(
 
 
 # =====================================================
+# ✅ NEW PATCH: transfer_money should open txn UI + play transfer_start.mp3
+# =====================================================
+TRANSFER_START_TEXT = "Та гүйлгээ хийх хүсэлт гаргажээ. Дараах мэдээллийг анхааралтай бөглөнө үү!"
+TRANSFER_START_VOICE = "/static/tts/transfer_start.mp3"
+
+
+def _apply_transfer_start_patch(final_intent: str, core: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    If intent is transfer_money, override core reply so we DON'T reply 'success' prematurely.
+    Frontend should open transaction form when action=='start_txn_form'.
+    """
+    if final_intent != "transfer_money":
+        return core
+
+    core = dict(core or {})
+    core["action"] = "start_txn_form"
+    core["reply_text"] = TRANSFER_START_TEXT
+    core["voice_url"] = TRANSFER_START_VOICE
+
+    # prevent accidental success artifacts from action_service
+    core["pdf_url"] = None
+    core["corebank_data"] = core.get("corebank_data")  # keep if you want; usually None
+    return core
+
+
+# =====================================================
 # ✅ TEST-ONLY: AUTO TEMPO (easy remove later)
-# -----------------------------------------------------
-# If speech is too fast, slow it slightly BEFORE /transcribe:
-#   - normal speech      -> tempo = 1.0 (skip)
-#   - fast speech        -> tempo = 0.9
-#   - very fast speech   -> tempo = 0.8
-#
-# EASY REMOVE:
-#   - Set INTENT_ATEMPO_ENABLE=0, OR
-#   - Delete/comment the "AUTO TEMPO" section + block in _stt_via_locked_transcribe
-#
-# Env:
-#   INTENT_ATEMPO_ENABLE=1  -> enable patch
-#   INTENT_ATEMPO_AUTO=1    -> auto pick tempo (default)
-#   FAST_SPEECH_ONSETS_PER_SEC=7.0
-#   VERYFAST_SPEECH_ONSETS_PER_SEC=9.0
-#   (If AUTO=0, use INTENT_ATEMPO as fixed tempo.)
 # =====================================================
 ATEMPO_ENABLE = os.getenv("INTENT_ATEMPO_ENABLE", "0") == "1"
 ATEMPO_AUTO = os.getenv("INTENT_ATEMPO_AUTO", "1") == "1"  # default auto
@@ -327,15 +338,6 @@ def _apply_atempo_to_audio_bytes(
     tempo: str = "0.9",
     diag: bool = False,
 ) -> bytes:
-    """
-    TEST ONLY:
-    Runs ffmpeg: -filter:a "atempo=<tempo>" and outputs WAV.
-    Returns NEW bytes if successful; otherwise returns original bytes.
-
-    NOTE:
-    - This adds a small preprocessing cost (usually ~10-200ms).
-    - Output is WAV container; /transcribe already accepts wav.
-    """
     if not raw_bytes:
         return raw_bytes
 
@@ -349,7 +351,6 @@ def _apply_atempo_to_audio_bytes(
         with open(tmp_in, "wb") as f:
             f.write(raw_bytes)
 
-        # ffmpeg atempo -> output WAV (keep it simple)
         subprocess.run(
             [
                 "ffmpeg",
@@ -397,13 +398,6 @@ def _pick_tempo_simple_from_audio_bytes(
     orig_filename: str,
     diag: bool = False,
 ) -> float:
-    """
-    Simple audio-only speed check (no transcription):
-      - load audio at 16k mono
-      - estimate voiced (non-silent) seconds
-      - compute onset events / voiced second (proxy for speed)
-    Returns tempo: 1.0, 0.9, or 0.8
-    """
     if not raw_bytes:
         return 1.0
 
@@ -416,18 +410,15 @@ def _pick_tempo_simple_from_audio_bytes(
         with open(tmp_in, "wb") as f:
             f.write(raw_bytes)
 
-        # Load as mono 16k
         y, sr = librosa.load(tmp_in, sr=16000, mono=True)
         dur = float(len(y) / sr) if sr else 0.0
         if dur < 0.5:
-            return 1.0  # too short to judge
+            return 1.0
 
-        # Estimate voiced duration (non-silent)
         intervals = librosa.effects.split(y, top_db=30)
         voiced_sec = float(sum((e - s) for s, e in intervals) / sr) if len(intervals) else dur
         voiced_sec = max(0.001, voiced_sec)
 
-        # Onset rate (proxy for speed)
         onset_env = librosa.onset.onset_strength(y=y, sr=sr)
         onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr)
         onset_rate = float(len(onsets) / voiced_sec)
@@ -462,24 +453,12 @@ def _pick_tempo_simple_from_audio_bytes(
 # ✅ Single STT source: call LOCKED app.py /transcribe in-process
 # =====================================================
 async def _stt_via_locked_transcribe(request: Request, file: UploadFile) -> dict:
-    """
-    ✅ Single source of truth for STT:
-    Call LOCKED app.py /transcribe IN-PROCESS (no network hop).
-    ✅ Compatible with older/newer httpx via ASGITransport.
-
-    ✅ TEST ONLY (easy delete):
-    If INTENT_ATEMPO_ENABLE=1, we optionally preprocess with auto-picked tempo before calling /transcribe.
-    """
     b = await file.read()
     if not b:
         raise HTTPException(status_code=400, detail="Empty audio file")
 
-    # Keep original bytes for archive
     orig_b = b
 
-    # ===========================
-    # 🧪 TEST-ONLY AUTO TEMPO PATCH (easy remove later)
-    # ===========================
     if ATEMPO_ENABLE:
         tempo = 1.0
 
@@ -508,7 +487,6 @@ async def _stt_via_locked_transcribe(request: Request, file: UploadFile) -> dict
         else:
             if ENV_DIAG:
                 print("🧪 [AUTO_TEMPO] tempo=1.0 → skipped")
-    # ===========================
 
     try:
         transport = httpx.ASGITransport(app=request.app)
@@ -542,7 +520,6 @@ async def _stt_via_locked_transcribe(request: Request, file: UploadFile) -> dict
     if not (j.get("user_text") or "").strip():
         raise HTTPException(status_code=400, detail="STT produced empty transcript")
 
-    # IMPORTANT: archive ORIGINAL bytes (not tempo-modified)
     j["_raw_bytes"] = orig_b
     j["_orig_filename"] = file.filename or "audio.wav"
     return j
@@ -558,25 +535,16 @@ async def voice_intent(
     user_id: str = Form(...),
     file: UploadFile = File(...),
 ):
-    """
-    Audio -> /transcribe -> classify -> corebank bridge -> response
-    HARDENED: never leaks plain-text 500
-    Async archive:
-      - save 16k mono PCM16 WAV
-      - append metadata row with transcript+intent
-    """
     dlog = mk_dlog(ENV_DIAG)
     t_total0 = time.perf_counter()
 
     try:
-        # ---- STT (single source of truth: app.py /transcribe) ----
         t_stt0 = time.perf_counter()
         stt_json = await _stt_via_locked_transcribe(request, file)
         t_stt1 = time.perf_counter()
 
         user_text = (stt_json.get("user_text") or "").strip()
 
-        # ---- Processing: classify + core ----
         t_proc0 = time.perf_counter()
 
         brain = hub_classify(user_text, dlog) or {}
@@ -595,10 +563,12 @@ async def voice_intent(
 
         final_intent = core.get("intent_override") or pred_intent
 
+        # ✅ NEW PATCH applied here (NO other code touched)
+        core = _apply_transfer_start_patch(final_intent, core)
+
         t_proc1 = time.perf_counter()
         t_total1 = time.perf_counter()
 
-        # ---- Async archive in parallel (NO impact to timing fields) ----
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         out_wav_name = f"int{user_id}_{ts}.wav"
         raw_bytes = stt_json.get("_raw_bytes") or b""
@@ -660,13 +630,6 @@ async def voice_intent(
 # =====================================================
 @router.post("/text_intent", response_model=IntentResponse)
 async def text_intent(request: Request, background_tasks: BackgroundTasks, payload: dict):
-    """
-    Text -> classify -> corebank bridge -> response
-    HARDENED: never leaks plain-text 500
-    Async archive:
-      - default: append to metadata.csv
-      - optional: write /text/*.txt if TEXT_ARCHIVE_MODE=files
-    """
     dlog = mk_dlog(ENV_DIAG)
     t_total0 = time.perf_counter()
 
@@ -696,10 +659,12 @@ async def text_intent(request: Request, background_tasks: BackgroundTasks, paylo
 
         final_intent = core.get("intent_override") or pred_intent
 
+        # ✅ NEW PATCH applied here too (NO other code touched)
+        core = _apply_transfer_start_patch(final_intent, core)
+
         t_proc1 = time.perf_counter()
         t_total1 = time.perf_counter()
 
-        # ---- Async persistence (NO impact to timing fields) ----
         def _persist_text():
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             rel_file = ""
@@ -711,7 +676,7 @@ async def text_intent(request: Request, background_tasks: BackgroundTasks, paylo
             _append_metadata_row(
                 user_id=user_id,
                 kind="text",
-                file_name=rel_file,  # "" (csv-only) OR "text/xxx.txt" (files mode)
+                file_name=rel_file,
                 text=text,
                 pred_intent=pred_intent,
                 final_intent=final_intent,
