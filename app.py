@@ -14,6 +14,9 @@
 # ✅ GAME-CHANGER HARDENING (NO OTHER LOGIC TOUCHED):
 # - If filename says ".wav" but bytes are actually webm/ogg/mp3 → WAV fast-path fails → fallback to ffmpeg safely
 # - File upload remains flexible: mp3/m4a/webm/ogg/wav all accepted (audio/* or octet-stream)
+#
+# ✅ TRANSACTION PATCH (ONLY):
+# - Mount /txn routes (txn_router.py) so /txn/normalize_slot works (fixes 404)
 # ===============================================
 
 import os, tempfile, psutil, logging, time, sys, re
@@ -177,6 +180,16 @@ except Exception as e:
 from intention.intent_router import router as intent_router
 app.include_router(intent_router, prefix="/intent")
 print("✅ Mounted /intent routes successfully")
+
+# ===============================================
+# ✅ TRANSACTION PATCH (ONLY): Mount /txn routes
+# ===============================================
+try:
+    from intention.txn_router import router as txn_router
+    app.include_router(txn_router, prefix="/txn", tags=["txn"])
+    print("✅ Mounted /txn routes successfully")
+except Exception as e:
+    print(f"⚠️ txn_router import failed: {e}")
 
 # -------- Static mounts --------
 app.mount("/record_archive", StaticFiles(directory=ARCHIVE_DIR), name="record_archive")
