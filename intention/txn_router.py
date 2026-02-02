@@ -18,6 +18,10 @@ router = APIRouter()
 TXN_APP_IMPORT = os.getenv("TXN_APP_IMPORT", "app:app")
 _PREVIEW_CACHE: Dict[str, Dict[str, Any]] = {}
 
+# ✅ FINAL SUCCESS REPLY (minimal principle)
+SUCCESS_TXN_TEXT = "Таны гүйлгээ, төлбөр шилжүүлгийн хүсэлт амжилттай илгээгдлээ!"
+
+
 class TxnPreviewIn(BaseModel):
     user_id: str
     iban_full: str = ""
@@ -25,11 +29,13 @@ class TxnPreviewIn(BaseModel):
     amount_value: float
     memo: str = ""
 
+
 def _mask(d: str) -> str:
     digits = re.sub(r"\D+", "", d or "")
     if len(digits) <= 4:
         return digits
     return ("•" * (len(digits) - 4)) + digits[-4:]
+
 
 async def _transcribe_internal(file_bytes: bytes, filename: str, mime: str, uid: str) -> str:
     mod_name, obj_name = TXN_APP_IMPORT.split(":", 1)
@@ -41,6 +47,7 @@ async def _transcribe_internal(file_bytes: bytes, filename: str, mime: str, uid:
         files = {"file": (filename, file_bytes, mime)}
         r = await client.post("/transcribe", files=files, data={"user_id": uid}, timeout=60.0)
         return r.json().get("user_text", "")
+
 
 @router.post("/normalize_slot")
 async def normalize_slot(
@@ -94,10 +101,12 @@ async def normalize_slot(
             data, conf = resolve_amount_logic(clean_text)
             val = min(99, data.get("value", 0))
             fixed = data.get("fixed_text", clean_text)
+
         elif slot == "amount_tugrug":
             data, conf = resolve_amount_logic(clean_text)
             val = data.get("value", 0)
             fixed = data.get("fixed_text", clean_text)
+
         else:
             tug, mon, conf = resolve_money(clean_text)
             val = float(tug + (mon / 100))
@@ -111,6 +120,7 @@ async def normalize_slot(
         }
 
     return res_data
+
 
 @router.post("/preview")
 async def preview_txn(payload: TxnPreviewIn):
@@ -128,9 +138,16 @@ async def preview_txn(payload: TxnPreviewIn):
         "total_debit": payload.amount_value + fee
     }
 
+
 @router.post("/execute")
 async def execute_txn(payload: Dict[str, Any]):
     prev_id = payload.get("txn_preview_id")
     if not prev_id or prev_id not in _PREVIEW_CACHE:
         raise HTTPException(status_code=400, detail="Invalid session")
-    return {"ok": True, "transfer_id": f"TXN-{uuid.uuid4().hex[:6].upper()}"}
+
+    # ✅ FINAL: success reply included (works for both voice + text transaction UIs)
+    return {
+        "ok": True,
+        "transfer_id": f"TXN-{uuid.uuid4().hex[:6].upper()}",
+        "reply_text": SUCCESS_TXN_TEXT,
+    }
