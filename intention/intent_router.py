@@ -1,8 +1,8 @@
 # intention/intent_router.py
 # ===============================================
-# 🌐 Intent Router (FINAL LOCKED — Single STT Source + Async Archive)
+# 🌐 Intent Router (MINIMAL LOCKED — Single STT Source + Async Archive)
 # -----------------------------------------------
-# Endpoints only:
+# Endpoints:
 #   POST /voice_intent (audio -> app.py /transcribe -> classify -> core)
 #   POST /text_intent  (text  -> classify -> core)
 #
@@ -12,26 +12,8 @@
 # ✅ HARDENED: never leaks plain-text 500 (all crashes -> JSON {"detail": ...})
 # ✅ Adds timings + user_text for demo panels
 #
-# ✅ NEW: Async persistence (does NOT affect timing panel)
-#   - voice_intent: converts uploaded bytes -> 16k mono PCM16 WAV in background
-#                  saves to local_persistent/intention_archive/wavs/
-#                  appends transcript+intent row to local_persistent/intention_archive/metadata.csv
-#   - text_intent : appends to metadata.csv by default
-#                  optionally writes /text/txt<user>_<ts>.txt if TEXT_ARCHIVE_MODE=files
-#
-# Env:
-#   TEXT_ARCHIVE_MODE=csv   (default) | files
-#
-# ✅ TEST-ONLY AUTO TEMPO PATCH (easy to remove later)
-#   INTENT_ATEMPO_ENABLE=1  -> enable
-#   INTENT_ATEMPO_AUTO=1    -> auto pick (default)
-#   FAST_SPEECH_ONSETS_PER_SEC=7.0
-#   VERYFAST_SPEECH_ONSETS_PER_SEC=9.0
-#   (If AUTO=0, you can use INTENT_ATEMPO=0.9 as fixed tempo.)
-#
-# ✅ NEW PATCH:
-#   transfer_money intent returns START PROMPT + transfer_start.mp3
-#   (prevents premature "transfer_success" response)
+# ✅ Async persistence (does NOT affect timing panel)
+# ✅ transfer_money patch: returns START PROMPT + transfer_start.mp3
 # ===============================================
 
 import os
@@ -65,7 +47,6 @@ def mk_dlog(enabled: bool):
     def _dlog(*a, **k):
         if enabled:
             print(*a, **k)
-
     return _dlog
 
 
@@ -91,10 +72,10 @@ class IntentResponse(BaseModel):
     intent_choices: Optional[List[str]] = None
     clarify_keyword: Optional[str] = None
 
-    # ✅ display name from domain_model.json
+    # display name from domain_model.json
     display_mn: Optional[str] = None
 
-    # ✅ demo/timing fields
+    # demo/timing fields
     user_text: Optional[str] = None
     stt_ms: Optional[int] = None
     processing_ms: Optional[int] = None
@@ -119,10 +100,6 @@ TEXT_ARCHIVE_MODE = os.getenv("TEXT_ARCHIVE_MODE", "csv").lower().strip()
 
 
 def _ensure_metadata_header(diag: bool = False):
-    """
-    If metadata.csv exists and is non-empty, do nothing.
-    If missing/empty, create with a stable header.
-    """
     try:
         if os.path.exists(INTENTION_META_CSV) and os.stat(INTENTION_META_CSV).st_size > 10:
             return
@@ -132,8 +109,8 @@ def _ensure_metadata_header(diag: bool = False):
                 [
                     "ts",
                     "user_id",
-                    "kind",  # voice | text
-                    "file_name",  # wavs/<...>.wav OR text/<...>.txt OR ""
+                    "kind",         # voice | text
+                    "file_name",    # wavs/<...>.wav OR text/<...>.txt OR ""
                     "text",
                     "pred_intent",
                     "final_intent",
@@ -166,9 +143,6 @@ def _append_metadata_row(
     source: str,
     diag: bool = False,
 ):
-    """
-    Append a single row to local_persistent/intention_archive/metadata.csv
-    """
     try:
         _ensure_metadata_header(diag=diag)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -190,19 +164,13 @@ def _append_metadata_row(
                 ]
             )
         if diag:
-            print(
-                f"🧾 [INTENTION_ARCHIVE] metadata append ({kind}) final={final_intent} file={file_name}"
-            )
+            print(f"🧾 [INTENTION_ARCHIVE] metadata append ({kind}) final={final_intent} file={file_name}")
     except Exception as e:
         if diag:
             print(f"⚠️ [INTENTION_ARCHIVE] metadata append failed: {type(e).__name__}: {e}")
 
 
 def _write_text_file(user_id: str, text: str, base_name: str, diag: bool = False) -> str:
-    """
-    Writes local_persistent/intention_archive/text/<base_name>.txt
-    Returns rel path: "text/<base_name>.txt"
-    """
     try:
         os.makedirs(INTENTION_TEXT_DIR, exist_ok=True)
         abs_path = os.path.join(INTENTION_TEXT_DIR, f"{base_name}.txt")
@@ -222,24 +190,15 @@ def _convert_and_save_wav_16k_mono_pcm16(
     *,
     raw_bytes: bytes,
     orig_filename: str,
-    out_wav_name: str,  # file name only, e.g. "intusr001_20260128_....wav"
+    out_wav_name: str,
     diag: bool = False,
 ):
-    """
-    Background task:
-      - takes original uploaded bytes (mp3/webm/ogg/wav/anything ffmpeg can read)
-      - converts to 16k mono PCM16 WAV
-      - saves into local_persistent/intention_archive/wavs/<out_wav_name>
-
-    NOTE: This runs async so it doesn't affect timing panel.
-    """
     if not raw_bytes:
         return
 
     tmp_in = None
     tmp_out = None
     try:
-        # Keep extension hint for ffmpeg input
         ext = os.path.splitext(orig_filename or "")[1].lower() or ".bin"
         tmp_in = tempfile.mktemp(suffix=ext)
         tmp_out = tempfile.mktemp(suffix=".wav")
@@ -247,7 +206,6 @@ def _convert_and_save_wav_16k_mono_pcm16(
         with open(tmp_in, "wb") as f:
             f.write(raw_bytes)
 
-        # ffmpeg -> 16k mono PCM16 wav
         subprocess.run(
             [
                 "ffmpeg",
@@ -278,9 +236,7 @@ def _convert_and_save_wav_16k_mono_pcm16(
             w.write(wav_bytes)
 
         if diag:
-            print(
-                f"💾 [INTENTION_ARCHIVE] saved 16k PCM16 WAV → {final_path} ({len(wav_bytes)} bytes)"
-            )
+            print(f"💾 [INTENTION_ARCHIVE] saved 16k PCM16 WAV → {final_path} ({len(wav_bytes)} bytes)")
 
     except Exception as e:
         if diag:
@@ -295,17 +251,13 @@ def _convert_and_save_wav_16k_mono_pcm16(
 
 
 # =====================================================
-# ✅ NEW PATCH: transfer_money should open txn UI + play transfer_start.mp3
+# ✅ transfer_money start patch
 # =====================================================
 TRANSFER_START_TEXT = "Та гүйлгээ хийх хүсэлт гаргажээ. Дараах мэдээллийг анхааралтай бөглөнө үү!"
 TRANSFER_START_VOICE = "/static/tts/transfer_start.mp3"
 
 
 def _apply_transfer_start_patch(final_intent: str, core: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    If intent is transfer_money, override core reply so we DON'T reply 'success' prematurely.
-    Frontend should open transaction form when action=='start_txn_form'.
-    """
     if final_intent != "transfer_money":
         return core
 
@@ -313,140 +265,8 @@ def _apply_transfer_start_patch(final_intent: str, core: Dict[str, Any]) -> Dict
     core["action"] = "start_txn_form"
     core["reply_text"] = TRANSFER_START_TEXT
     core["voice_url"] = TRANSFER_START_VOICE
-
-    # prevent accidental success artifacts from action_service
     core["pdf_url"] = None
-    core["corebank_data"] = core.get("corebank_data")  # keep if you want; usually None
     return core
-
-
-# =====================================================
-# ✅ TEST-ONLY: AUTO TEMPO (easy remove later)
-# =====================================================
-ATEMPO_ENABLE = os.getenv("INTENT_ATEMPO_ENABLE", "0") == "1"
-ATEMPO_AUTO = os.getenv("INTENT_ATEMPO_AUTO", "1") == "1"  # default auto
-ATEMPO_VALUE = os.getenv("INTENT_ATEMPO", "0.9").strip()   # used only if AUTO=0
-
-FAST_SPEECH_ONSETS_PER_SEC = float(os.getenv("FAST_SPEECH_ONSETS_PER_SEC", "7.0"))
-VERYFAST_SPEECH_ONSETS_PER_SEC = float(os.getenv("VERYFAST_SPEECH_ONSETS_PER_SEC", "9.0"))
-
-
-def _apply_atempo_to_audio_bytes(
-    *,
-    raw_bytes: bytes,
-    orig_filename: str,
-    tempo: str = "0.9",
-    diag: bool = False,
-) -> bytes:
-    if not raw_bytes:
-        return raw_bytes
-
-    tmp_in = None
-    tmp_out = None
-    try:
-        ext = os.path.splitext(orig_filename or "")[1].lower() or ".bin"
-        tmp_in = tempfile.mktemp(suffix=ext)
-        tmp_out = tempfile.mktemp(suffix=".wav")
-
-        with open(tmp_in, "wb") as f:
-            f.write(raw_bytes)
-
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                tmp_in,
-                "-filter:a",
-                f"atempo={tempo}",
-                "-vn",
-                "-f",
-                "wav",
-                tmp_out,
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        with open(tmp_out, "rb") as r:
-            out_bytes = r.read()
-
-        if diag:
-            print(
-                f"🧪 [ATEMPO] applied atempo={tempo} bytes_in={len(raw_bytes)} bytes_out={len(out_bytes)}"
-            )
-
-        return out_bytes or raw_bytes
-
-    except Exception as e:
-        if diag:
-            print(f"⚠️ [ATEMPO] failed (tempo={tempo}) fallback original: {type(e).__name__}: {e}")
-        return raw_bytes
-    finally:
-        for p in (tmp_in, tmp_out):
-            if p and os.path.exists(p):
-                try:
-                    os.remove(p)
-                except Exception:
-                    pass
-
-
-def _pick_tempo_simple_from_audio_bytes(
-    *,
-    raw_bytes: bytes,
-    orig_filename: str,
-    diag: bool = False,
-) -> float:
-    if not raw_bytes:
-        return 1.0
-
-    tmp_in = None
-    try:
-        import librosa
-
-        ext = os.path.splitext(orig_filename or "")[1].lower() or ".bin"
-        tmp_in = tempfile.mktemp(suffix=ext)
-        with open(tmp_in, "wb") as f:
-            f.write(raw_bytes)
-
-        y, sr = librosa.load(tmp_in, sr=16000, mono=True)
-        dur = float(len(y) / sr) if sr else 0.0
-        if dur < 0.5:
-            return 1.0
-
-        intervals = librosa.effects.split(y, top_db=30)
-        voiced_sec = float(sum((e - s) for s, e in intervals) / sr) if len(intervals) else dur
-        voiced_sec = max(0.001, voiced_sec)
-
-        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-        onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr)
-        onset_rate = float(len(onsets) / voiced_sec)
-
-        if diag:
-            print(
-                f"🧪 [AUTO_TEMPO] dur={dur:.2f}s voiced={voiced_sec:.2f}s "
-                f"onsets={len(onsets)} rate={onset_rate:.2f}/s "
-                f"(fast>={FAST_SPEECH_ONSETS_PER_SEC}, vfast>={VERYFAST_SPEECH_ONSETS_PER_SEC})"
-            )
-
-        if onset_rate >= VERYFAST_SPEECH_ONSETS_PER_SEC:
-            return 0.8
-        if onset_rate >= FAST_SPEECH_ONSETS_PER_SEC:
-            return 0.9
-        return 1.0
-
-    except Exception as e:
-        if diag:
-            print(f"⚠️ [AUTO_TEMPO] check failed → fallback 1.0: {type(e).__name__}: {e}")
-        return 1.0
-
-    finally:
-        if tmp_in and os.path.exists(tmp_in):
-            try:
-                os.remove(tmp_in)
-            except Exception:
-                pass
 
 
 # =====================================================
@@ -458,35 +278,6 @@ async def _stt_via_locked_transcribe(request: Request, file: UploadFile) -> dict
         raise HTTPException(status_code=400, detail="Empty audio file")
 
     orig_b = b
-
-    if ATEMPO_ENABLE:
-        tempo = 1.0
-
-        if ATEMPO_AUTO:
-            tempo = _pick_tempo_simple_from_audio_bytes(
-                raw_bytes=b,
-                orig_filename=file.filename or "audio.wav",
-                diag=ENV_DIAG,
-            )
-        else:
-            try:
-                tempo = float(ATEMPO_VALUE or "1.0")
-            except Exception:
-                tempo = 1.0
-
-        if tempo < 0.999:
-            t0 = time.perf_counter()
-            b = _apply_atempo_to_audio_bytes(
-                raw_bytes=b,
-                orig_filename=file.filename or "audio.wav",
-                tempo=str(tempo),
-                diag=ENV_DIAG,
-            )
-            if ENV_DIAG:
-                print(f"🧪 [AUTO_TEMPO] applied tempo={tempo} preprocess_ms={(time.perf_counter() - t0)*1000:.1f}")
-        else:
-            if ENV_DIAG:
-                print("🧪 [AUTO_TEMPO] tempo=1.0 → skipped")
 
     try:
         transport = httpx.ASGITransport(app=request.app)
@@ -503,9 +294,7 @@ async def _stt_via_locked_transcribe(request: Request, file: UploadFile) -> dict
                 timeout=120.0,
             )
     except Exception as e:
-        raise HTTPException(
-            status_code=502, detail=f"Internal /transcribe call failed: {type(e).__name__}: {e}"
-        )
+        raise HTTPException(status_code=502, detail=f"Internal /transcribe call failed: {type(e).__name__}: {e}")
 
     if r.status_code != 200:
         raise HTTPException(status_code=r.status_code, detail=f"/transcribe failed: {r.text[:2000]}")
@@ -513,9 +302,7 @@ async def _stt_via_locked_transcribe(request: Request, file: UploadFile) -> dict
     try:
         j = r.json()
     except Exception as e:
-        raise HTTPException(
-            status_code=502, detail=f"/transcribe returned non-JSON: {type(e).__name__}: {e}"
-        )
+        raise HTTPException(status_code=502, detail=f"/transcribe returned non-JSON: {type(e).__name__}: {e}")
 
     if not (j.get("user_text") or "").strip():
         raise HTTPException(status_code=400, detail="STT produced empty transcript")
@@ -562,8 +349,6 @@ async def voice_intent(
         )
 
         final_intent = core.get("intent_override") or pred_intent
-
-        # ✅ NEW PATCH applied here (NO other code touched)
         core = _apply_transfer_start_patch(final_intent, core)
 
         t_proc1 = time.perf_counter()
@@ -626,7 +411,7 @@ async def voice_intent(
 
 
 # =====================================================
-# ✅ /text_intent (now also persisted)
+# ✅ /text_intent (persisted)
 # =====================================================
 @router.post("/text_intent", response_model=IntentResponse)
 async def text_intent(request: Request, background_tasks: BackgroundTasks, payload: dict):
@@ -658,8 +443,6 @@ async def text_intent(request: Request, background_tasks: BackgroundTasks, paylo
         )
 
         final_intent = core.get("intent_override") or pred_intent
-
-        # ✅ NEW PATCH applied here too (NO other code touched)
         core = _apply_transfer_start_patch(final_intent, core)
 
         t_proc1 = time.perf_counter()
