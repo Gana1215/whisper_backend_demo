@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os, re, uuid, time, importlib
-from typing import Dict, Any
+import os, re, uuid, time, importlib, csv
+from typing import Dict, Any, List
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
@@ -21,11 +21,102 @@ TXN_APP_IMPORT = os.getenv("TXN_APP_IMPORT", "app:app")
 
 _PREVIEW_CACHE: Dict[str, Dict[str, Any]] = {}
 
-# ✅ NEW: Stream cache for chunking / append mode (IBAN + Account only)
+# ✅ Stream cache for chunking / append mode (IBAN + Account only)
 _STREAM_CACHE: Dict[str, Dict[str, Any]] = {}
 
 # ✅ FINAL SUCCESS REPLY (minimal principle)
 SUCCESS_TXN_TEXT = "Таны гүйлгээ, төлбөр шилжүүлгийн хүсэлт амжилттай илгээгдлээ!"
+
+
+# =====================================================
+# ✅ Corebank reply CSV loader (for acc1/acc2 dropdown)
+# Location: static/corebank_reply.csv
+# =====================================================
+BASE_DIR = os.getcwd()
+COREBANK_CSV_PATH = os.getenv("COREBANK_CSV_PATH", os.path.join(BASE_DIR, "static", "corebank_reply.csv"))
+
+
+def _load_corebank_csv() -> Dict[str, str]:
+    """
+    Reads static/corebank_reply.csv as simple key,value lines.
+    Example:
+      acc1,MN17000500 5004003020
+      acc2,MN15000300 5003201020
+      account_balance,1250000 ₮
+    """
+    data: Dict[str, str] = {}
+    try:
+        if not os.path.exists(COREBANK_CSV_PATH):
+            return data
+
+        with open(COREBANK_CSV_PATH, "r", encoding="utf-8") as f:
+            r = csv.reader(f)
+            for row in r:
+                if not row or len(row) < 2:
+                    continue
+                k = (row[0] or "").strip()
+                v = (row[1] or "").strip()
+                if not k:
+                    continue
+                # ignore comments / blank keys
+                if k.startswith("#"):
+                    continue
+                data[k] = v
+    except Exception:
+        # stay minimal: never crash transaction flow if CSV missing/bad
+        return {}
+    return data
+
+
+def _extract_from_accounts(cb: Dict[str, str]) -> List[str]:
+    """
+    Extract acc1, acc2, acc3... if present.
+    Also supports optional 'accounts' single field with separators.
+    """
+    out: List[str] = []
+
+    # acc1..accN
+    i = 1
+    while True:
+        k = f"acc{i}"
+        if k not in cb:
+            break
+        v = (cb.get(k) or "").strip()
+        if v:
+            out.append(v)
+        i += 1
+
+    # optional: accounts field
+    if not out:
+        raw = (cb.get("accounts") or "").strip()
+        if raw:
+            if "|" in raw:
+                out = [x.strip() for x in raw.split("|") if x.strip()]
+            else:
+                out = [x.strip() for x in raw.split(",") if x.strip()]
+
+    # de-dup preserve order
+    seen = set()
+    uniq: List[str] = []
+    for a in out:
+        aa = a.strip()
+        if not aa or aa in seen:
+            continue
+        seen.add(aa)
+        uniq.append(aa)
+    return uniq
+
+
+@router.get("/from_accounts")
+async def from_accounts():
+    """
+    Minimal helper endpoint for UI:
+    - Returns list of available FROM accounts (acc1, acc2, ...)
+    - Returns entire csv dict as corebank_data (optional UI panels)
+    """
+    cb = _load_corebank_csv()
+    accounts = _extract_from_accounts(cb)
+    return {"accounts": accounts, "corebank_data": cb}
 
 
 class TxnPreviewIn(BaseModel):
@@ -96,7 +187,7 @@ async def normalize_slot(
     user_id: str = Form("usr001"),
     file: UploadFile = File(...),
 
-    # ✅ NEW (optional) — for chunking tactic test
+    # ✅ optional — for chunking tactic test
     append: str = Form("0"),        # "1" => append digits to stream cache
     stream_id: str = Form(""),      # unique id per recording session
     reset_stream: str = Form("0"),  # "1" => clear cached digits first
@@ -109,21 +200,17 @@ async def normalize_slot(
     # 1) STT
     raw_text = await _transcribe_internal(audio_data, file.filename, file.content_type, user_id)
 
-    # ✅ clean_text MUST exist
     clean_text = raw_text or ""
 
-    # base response
     res_data: Dict[str, Any] = {
         "slot": slot,
         "stt_text": raw_text or "EMPTY",
         "normalized": {},
-        # harmless extra fields for debug
         "append": append,
         "stream_id": stream_id,
         "reset_stream": reset_stream,
     }
 
-    # streaming only for iban/account in append mode
     is_stream = (append == "1") and (slot in ("iban", "account"))
     key = _stream_key(user_id, slot, stream_id)
 
@@ -133,8 +220,8 @@ async def normalize_slot(
     # 🟡 IBAN
     if slot == "iban":
         data, conf = resolve_iban_logic(clean_text)
-        val_full = data.get("value", "")               # expected "MN...."
-        val_digits = val_full.replace("MN", "")        # digits only
+        val_full = data.get("value", "")
+        val_digits = val_full.replace("MN", "")
 
         if is_stream:
             prev_digits = (_STREAM_CACHE.get(key) or {}).get("digits", "")
@@ -241,7 +328,6 @@ async def tx_request(payload: TxRequestIn):
         # =================================================
         # TODO: send payload to real core bank here.
         # Keep minimal: only approve flag is needed.
-        # ok = await corebank_transfer(payload.dict())
         # =================================================
         ok = True
 
