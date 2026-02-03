@@ -20,6 +20,7 @@
 # - Restores GET /intent/list_intents so frontend buttons show again
 # - Supports POST /intent/text_intent with {intent: "...", source:"direct_click"} (old behavior)
 # - Keeps display_mn flowing consistently
+# - ✅ BUGFIX: domain_model.json dict-shape supported (your current file)
 # ===============================================
 
 import os
@@ -288,6 +289,12 @@ def _find_domain_model_path() -> Optional[str]:
 def _load_intents_from_domain_model(diag: bool = False) -> List[Dict[str, str]]:
     """
     Returns: [{"name": "...", "display_mn": "..."}]
+
+    Supports BOTH shapes:
+      A) dict-of-intents (YOUR CURRENT domain_model.json):
+         {"check_balance": {...}, "transfer_money": {...}}
+      B) list-of-dicts (or wrapper dict with intents/items):
+         {"intents":[{...}]}  OR  [{"name":"..."}]
     """
     try:
         path = _find_domain_model_path()
@@ -305,34 +312,67 @@ def _load_intents_from_domain_model(diag: bool = False) -> List[Dict[str, str]]:
         with open(path, "r", encoding="utf-8") as f:
             j = json.load(f)
 
-        # accept a few shapes:
-        # - {"intents":[{...}]}
-        # - {"domains":[...]} (we ignore)
-        # - {"items":[...]}
-        raw = []
-        if isinstance(j, dict):
+        out: List[Dict[str, str]] = []
+
+        # ✅ CASE A: dict-of-intents (your current file)
+        if isinstance(j, dict) and j and all(isinstance(v, dict) for v in j.values()):
+            for key, cfg in j.items():
+                name = (key or "").strip()
+                if not name:
+                    continue
+                display = (
+                    cfg.get("display_mn")
+                    or cfg.get("display")
+                    or cfg.get("title")
+                    or cfg.get("display_name")
+                    or name
+                )
+                out.append({"name": name, "display_mn": str(display).strip()})
+
+        # ✅ CASE B: wrapper dict with list inside
+        elif isinstance(j, dict):
+            raw = []
             if isinstance(j.get("intents"), list):
                 raw = j["intents"]
             elif isinstance(j.get("items"), list):
                 raw = j["items"]
             else:
-                # fallback: if dict with many keys, try to scan values
                 for v in j.values():
-                    if isinstance(v, list) and v and isinstance(v[0], dict) and ("name" in v[0] or "intent" in v[0]):
+                    if isinstance(v, list) and v and isinstance(v[0], dict):
                         raw = v
                         break
-        elif isinstance(j, list):
-            raw = j
 
-        out = []
-        for it in raw or []:
-            if not isinstance(it, dict):
-                continue
-            name = (it.get("name") or it.get("intent") or it.get("key") or "").strip()
-            if not name:
-                continue
-            display = (it.get("display_mn") or it.get("display") or it.get("title") or it.get("display_name") or name).strip()
-            out.append({"name": name, "display_mn": display})
+            for it in raw or []:
+                if not isinstance(it, dict):
+                    continue
+                name = (it.get("name") or it.get("intent") or it.get("key") or "").strip()
+                if not name:
+                    continue
+                display = (
+                    it.get("display_mn")
+                    or it.get("display")
+                    or it.get("title")
+                    or it.get("display_name")
+                    or name
+                )
+                out.append({"name": name, "display_mn": str(display).strip()})
+
+        # ✅ CASE C: top-level list
+        elif isinstance(j, list):
+            for it in j:
+                if not isinstance(it, dict):
+                    continue
+                name = (it.get("name") or it.get("intent") or it.get("key") or "").strip()
+                if not name:
+                    continue
+                display = (
+                    it.get("display_mn")
+                    or it.get("display")
+                    or it.get("title")
+                    or it.get("display_name")
+                    or name
+                )
+                out.append({"name": name, "display_mn": str(display).strip()})
 
         _DOMAIN_CACHE["path"] = path
         _DOMAIN_CACHE["mtime"] = mtime
