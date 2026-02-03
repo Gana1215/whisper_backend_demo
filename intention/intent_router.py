@@ -4,7 +4,8 @@
 # -----------------------------------------------
 # Endpoints:
 #   POST /voice_intent (audio -> app.py /transcribe -> classify -> core)
-#   POST /text_intent  (text  -> classify -> core)
+#   POST /text_intent  (text or intent-key -> classify/bypass -> core)
+#   GET  /list_intents (returns intents + display_mn from domain_model.json)
 #
 # ✅ app.py remains LOCKED (no changes required)
 # ✅ ZERO duplicate STT logic for transcription (single source: /transcribe)
@@ -14,11 +15,17 @@
 #
 # ✅ Async persistence (does NOT affect timing panel)
 # ✅ transfer_money patch: returns START PROMPT + transfer_start.mp3
+#
+# ✅ FIXED (THIS PATCH):
+# - Restores GET /intent/list_intents so frontend buttons show again
+# - Supports POST /intent/text_intent with {intent: "...", source:"direct_click"} (old behavior)
+# - Keeps display_mn flowing consistently
 # ===============================================
 
 import os
 import time
 import csv
+import json
 import datetime
 import tempfile
 import subprocess
@@ -133,7 +140,7 @@ def _append_metadata_row(
     user_id: str,
     kind: str,
     file_name: str,
-    text: str, 
+    text: str,
     pred_intent: str,
     final_intent: str,
     confidence: float,
@@ -248,6 +255,107 @@ def _convert_and_save_wav_16k_mono_pcm16(
                     os.remove(p)
                 except Exception:
                     pass
+
+
+# =====================================================
+# ✅ Domain model loader for /list_intents
+# =====================================================
+_DOMAIN_CACHE = {"path": None, "mtime": None, "intents": []}
+
+
+def _find_domain_model_path() -> Optional[str]:
+    """
+    Find domain_model.json reliably on Render + Local.
+    Supports env override: DOMAIN_MODEL_PATH
+    """
+    envp = os.getenv("DOMAIN_MODEL_PATH", "").strip()
+    if envp and os.path.exists(envp):
+        return envp
+
+    # common places in this repo structure
+    candidates = [
+        os.path.join(BASE_DIR, "domain_model.json"),
+        os.path.join(BASE_DIR, "intention", "domain_model.json"),
+        os.path.join(BASE_DIR, "src", "intention", "domain_model.json"),
+        os.path.join(BASE_DIR, "intents", "domain_model.json"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _load_intents_from_domain_model(diag: bool = False) -> List[Dict[str, str]]:
+    """
+    Returns: [{"name": "...", "display_mn": "..."}]
+    """
+    try:
+        path = _find_domain_model_path()
+        if not path:
+            if diag:
+                print("⚠️ [list_intents] domain_model.json not found")
+            return []
+
+        mtime = os.path.getmtime(path)
+
+        # cached
+        if _DOMAIN_CACHE["path"] == path and _DOMAIN_CACHE["mtime"] == mtime and _DOMAIN_CACHE["intents"]:
+            return _DOMAIN_CACHE["intents"]
+
+        with open(path, "r", encoding="utf-8") as f:
+            j = json.load(f)
+
+        # accept a few shapes:
+        # - {"intents":[{...}]}
+        # - {"domains":[...]} (we ignore)
+        # - {"items":[...]}
+        raw = []
+        if isinstance(j, dict):
+            if isinstance(j.get("intents"), list):
+                raw = j["intents"]
+            elif isinstance(j.get("items"), list):
+                raw = j["items"]
+            else:
+                # fallback: if dict with many keys, try to scan values
+                for v in j.values():
+                    if isinstance(v, list) and v and isinstance(v[0], dict) and ("name" in v[0] or "intent" in v[0]):
+                        raw = v
+                        break
+        elif isinstance(j, list):
+            raw = j
+
+        out = []
+        for it in raw or []:
+            if not isinstance(it, dict):
+                continue
+            name = (it.get("name") or it.get("intent") or it.get("key") or "").strip()
+            if not name:
+                continue
+            display = (it.get("display_mn") or it.get("display") or it.get("title") or it.get("display_name") or name).strip()
+            out.append({"name": name, "display_mn": display})
+
+        _DOMAIN_CACHE["path"] = path
+        _DOMAIN_CACHE["mtime"] = mtime
+        _DOMAIN_CACHE["intents"] = out
+
+        if diag:
+            print(f"✅ [list_intents] loaded {len(out)} intents from {path}")
+
+        return out
+
+    except Exception as e:
+        if diag:
+            print(f"⚠️ [list_intents] load failed: {type(e).__name__}: {e}")
+        return []
+
+
+# =====================================================
+# ✅ /list_intents (RESTORED for frontend)
+# =====================================================
+@router.get("/list_intents")
+async def list_intents():
+    intents = _load_intents_from_domain_model(diag=ENV_DIAG)
+    return {"intents": intents}
 
 
 # =====================================================
@@ -411,7 +519,7 @@ async def voice_intent(
 
 
 # =====================================================
-# ✅ /text_intent (persisted)
+# ✅ /text_intent (supports BOTH free-text + direct intent-click)
 # =====================================================
 @router.post("/text_intent", response_model=IntentResponse)
 async def text_intent(request: Request, background_tasks: BackgroundTasks, payload: dict):
@@ -419,28 +527,62 @@ async def text_intent(request: Request, background_tasks: BackgroundTasks, paylo
     t_total0 = time.perf_counter()
 
     try:
+        # ✅ accept BOTH
+        #   {text: "..."}  (normal)
+        #   {intent: "check_balance", source:"direct_click"} (button)
         text = (payload.get("text") or "").strip()
-        if not text:
+        direct_intent = (payload.get("intent") or payload.get("intent_key") or payload.get("name") or "").strip()
+
+        if not text and not direct_intent:
             raise HTTPException(status_code=400, detail="text missing")
 
         user_id = (payload.get("user_id") or "usr001").strip()
-        source = (payload.get("source") or "text_intent").strip()
+        source = (payload.get("source") or ("direct_click" if direct_intent else "text_intent")).strip()
 
         t_proc0 = time.perf_counter()
 
-        brain = hub_classify(text, dlog) or {}
-        pred_intent = brain.get("intent") or "unknown"
-        conf = float(brain.get("confidence") or 0.0)
+        # -------------------------
+        # 1) Button-click path: bypass classifier (confidence=1.0)
+        # -------------------------
+        if direct_intent:
+            pred_intent = direct_intent
+            conf = 1.0
+            brain = {
+                "intent": pred_intent,
+                "confidence": conf,
+                "entities": {},
+                "base_intent": pred_intent,
+                "base_confidence": conf,
+                "fallback_used": False,
+            }
 
-        core = (
-            apply_core_functions(
-                pred_intent=pred_intent,
-                conf=conf,
-                user_text=text,
-                dlog=dlog,
+            core = (
+                apply_core_functions(
+                    pred_intent=pred_intent,
+                    conf=conf,
+                    user_text=text or pred_intent,  # keep a non-empty user_text for logs/UI
+                    dlog=dlog,
+                )
+                or {}
             )
-            or {}
-        )
+
+        # -------------------------
+        # 2) Normal free-text path: classify
+        # -------------------------
+        else:
+            brain = hub_classify(text, dlog) or {}
+            pred_intent = brain.get("intent") or "unknown"
+            conf = float(brain.get("confidence") or 0.0)
+
+            core = (
+                apply_core_functions(
+                    pred_intent=pred_intent,
+                    conf=conf,
+                    user_text=text,
+                    dlog=dlog,
+                )
+                or {}
+            )
 
         final_intent = core.get("intent_override") or pred_intent
         core = _apply_transfer_start_patch(final_intent, core)
@@ -452,15 +594,18 @@ async def text_intent(request: Request, background_tasks: BackgroundTasks, paylo
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             rel_file = ""
 
+            # store what the user actually typed, OR the intent key if it was a click
+            persist_text = text or f"[intent_click] {direct_intent}"
+
             if TEXT_ARCHIVE_MODE == "files":
                 base = f"txt{user_id}_{ts}"
-                rel_file = _write_text_file(user_id, text, base, diag=ENV_DIAG)
+                rel_file = _write_text_file(user_id, persist_text, base, diag=ENV_DIAG)
 
             _append_metadata_row(
                 user_id=user_id,
                 kind="text",
                 file_name=rel_file,
-                text=text,
+                text=persist_text,
                 pred_intent=pred_intent,
                 final_intent=final_intent,
                 confidence=conf,
@@ -472,6 +617,9 @@ async def text_intent(request: Request, background_tasks: BackgroundTasks, paylo
             )
 
         background_tasks.add_task(_persist_text)
+
+        # show user_text for demo/chat panels
+        out_user_text = text or (payload.get("display") or payload.get("display_mn") or direct_intent)
 
         return IntentResponse(
             intent=final_intent,
@@ -488,7 +636,7 @@ async def text_intent(request: Request, background_tasks: BackgroundTasks, paylo
             intent_choices=None,
             clarify_keyword=None,
             display_mn=core.get("display_mn"),
-            user_text=text,
+            user_text=out_user_text,
             stt_ms=0,
             processing_ms=int((t_proc1 - t_proc0) * 1000),
             total_ms=int((t_total1 - t_total0) * 1000),
