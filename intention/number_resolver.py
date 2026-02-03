@@ -49,6 +49,11 @@ class NumberResolver:
         self._currency_max_dist = 2.2   # safe default for your weighted distance
         self._currency_min_len = 3      # ignore ultra-short junk
 
+        # ✅ ZERO ALIAS (Levenshtein-based): "ноль/нооль/..." -> "тэг"
+        self._zero_aliases = ["ноль", "нооль"]
+        self._zero_max_dist = 1.6
+        self._zero_min_len = 2
+
     # ---------------------------
     # Weighted Levenshtein
     # ---------------------------
@@ -101,6 +106,27 @@ class NumberResolver:
         return best <= self._currency_max_dist
 
     # ---------------------------
+    # ✅ Zero-like detection (Levenshtein)
+    # ---------------------------
+    def _is_zero_like(self, word: str) -> bool:
+        w_low = (word or "").lower()
+        clean = re.sub(r"[^а-яөүё]", "", w_low)
+        if not clean or len(clean) < self._zero_min_len:
+            return False
+
+        # Don't override real number tokens (e.g., "тэг")
+        if clean in self.values:
+            return False
+
+        best = float("inf")
+        for z in self._zero_aliases:
+            d = self._weighted_dist(clean, z)
+            if d < best:
+                best = d
+
+        return best <= self._zero_max_dist
+
+    # ---------------------------
     # Fix single token -> nearest vocab
     # ---------------------------
     def _fix(self, word):
@@ -108,6 +134,10 @@ class NumberResolver:
         clean = re.sub(r"[^а-яөүё]", "", w_low)
         if not clean or len(clean) < 2:
             return None
+
+        # ✅ ZERO PATCH: normalize "ноль/нооль/..." -> "тэг" using weighted distance
+        if self._is_zero_like(clean):
+            return "тэг"
 
         # If already known, keep
         if clean in self.values:
@@ -221,7 +251,6 @@ class NumberResolver:
 
                 # also drop currency-like next token if it appears as separate piece (extra safety)
                 if nxt and self._is_currency_like(nxt):
-                    # skip the next token (currency) but still process current token normally
                     raw[i + 1] = ""  # harmless; will be skipped by clean=="" on next loop
 
                 if nxt == self._particle_n and clean in self._ones_stems:
