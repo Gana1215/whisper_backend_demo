@@ -134,7 +134,7 @@ class TxRequestIn(BaseModel):
     txn_id: str
     from_acc: str
     to_acc: str
-    trans_amount: int
+    trans_amount: float  # ✅ Option A: keep NUMBER (supports 23333.89)
     memo: str = ""
     approved: str = "N"  # "N" | "Y"
 
@@ -322,7 +322,8 @@ async def tx_request(payload: TxRequestIn):
         if not (payload.to_acc or "").strip():
             raise HTTPException(status_code=400, detail="to_acc missing")
 
-        if int(payload.trans_amount or 0) <= 0:
+        # ✅ Option A validation: float-safe
+        if float(payload.trans_amount or 0) <= 0:
             raise HTTPException(status_code=400, detail="trans_amount must be > 0")
 
         # =================================================
