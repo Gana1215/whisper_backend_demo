@@ -42,6 +42,13 @@ class NumberResolver:
         self._particle_n = "нь"
         self._ones_stems = {"нэг", "хоёр", "гурав", "дөрөв", "тав", "зургаа", "долоо", "найм", "ес"}
 
+        # ✅ GOLDEN CURRENCY NOISE FILTER (Levenshtein-based, not typo hardcoding)
+        # Whisper can output: "мөнг", "мөнгү", "төгрөөг", etc.
+        # If those reach _fix(), "мөнгө" can become "мянга" (bad). So detect currency-like tokens and DROP them early.
+        self._currency_vocab = ["мөнгө", "төгрөг"]
+        self._currency_max_dist = 2.2   # safe default for your weighted distance
+        self._currency_min_len = 3      # ignore ultra-short junk
+
     # ---------------------------
     # Weighted Levenshtein
     # ---------------------------
@@ -67,6 +74,31 @@ class NumberResolver:
                     dp[i - 1][j - 1] + cost
                 )
         return dp[n][m]
+
+    # ---------------------------
+    # ✅ Currency-like detection (Levenshtein)
+    # ---------------------------
+    def _is_currency_like(self, word: str) -> bool:
+        w_low = (word or "").lower()
+        clean = re.sub(r"[^а-яөүё]", "", w_low)
+        if not clean or len(clean) < self._currency_min_len:
+            return False
+
+        # Never treat a valid number token as currency
+        if clean in self.values:
+            return False
+
+        # Exact match fast path
+        if clean in self._currency_vocab:
+            return True
+
+        best = float("inf")
+        for c in self._currency_vocab:
+            d = self._weighted_dist(clean, c)
+            if d < best:
+                best = d
+
+        return best <= self._currency_max_dist
 
     # ---------------------------
     # Fix single token -> nearest vocab
@@ -147,11 +179,6 @@ class NumberResolver:
         if stem == "гурав":
             return "гурван"
 
-        # very common suffix pattern:
-        # - stems ending with "в" or "р" often take "өн/ан"
-        # - stems ending with vowel-like often take "н"
-        # We'll keep it simple & safe for 1..9.
-        # These are already in values mapping, so returning one of those keys is critical.
         if stem == "дөрөв":
             return "дөрвөн"
         if stem == "тав":
@@ -182,10 +209,21 @@ class NumberResolver:
                 i += 1
                 continue
 
+            # ✅ GOLDEN: drop currency-like tokens before they can become "мянга" via _fix()
+            if self._is_currency_like(clean):
+                i += 1
+                continue
+
             # ⭐ JOIN PATCH: applies to ALL 1..9 stems, not just "гурван"
             # pattern: "<digit> нь"  => connective-form, skip "нь"
             if i + 1 < len(raw):
                 nxt = re.sub(r"[^а-яөүё]", "", raw[i + 1])
+
+                # also drop currency-like next token if it appears as separate piece (extra safety)
+                if nxt and self._is_currency_like(nxt):
+                    # skip the next token (currency) but still process current token normally
+                    raw[i + 1] = ""  # harmless; will be skipped by clean=="" on next loop
+
                 if nxt == self._particle_n and clean in self._ones_stems:
                     out.append(self._to_connective_form(clean))
                     i += 2
@@ -208,6 +246,11 @@ class NumberResolver:
                 for piece in pieces:
                     if not piece:
                         continue
+
+                    # Drop currency-like pieces as well (can happen if glued)
+                    if self._is_currency_like(piece):
+                        continue
+
                     if piece == self._particle_n:
                         continue
                     if piece in self.values:

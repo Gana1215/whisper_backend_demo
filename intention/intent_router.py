@@ -133,7 +133,7 @@ def _append_metadata_row(
     user_id: str,
     kind: str,
     file_name: str,
-    text: str,
+    text: str, 
     pred_intent: str,
     final_intent: str,
     confidence: float,
