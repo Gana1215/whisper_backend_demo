@@ -29,11 +29,23 @@ SUCCESS_TXN_TEXT = "Таны гүйлгээ, төлбөр шилжүүлгийн
 
 
 class TxnPreviewIn(BaseModel):
+    # (kept for backward compatibility / untouchable other logic — but not used)
     user_id: str
     iban_full: str = ""
     account_digits: str = ""
     amount_value: float
     memo: str = ""
+
+
+# ✅ NEW (LOCKED): transaction request payload
+class TxRequestIn(BaseModel):
+    # 🔒 LOCKED TX JSON (front/back)
+    txn_id: str
+    from_acc: str
+    to_acc: str
+    trans_amount: int
+    memo: str = ""
+    approved: str = "N"  # "N" | "Y"
 
 
 def _mask(d: str) -> str:
@@ -201,32 +213,52 @@ async def normalize_slot(
     return res_data
 
 
-@router.post("/preview")
-async def preview_txn(payload: TxnPreviewIn):
-    pid = f"prev_{uuid.uuid4().hex[:8]}"
-    fee = max(100, int(payload.amount_value * 0.002))
-    target = payload.iban_full if payload.iban_full else payload.account_digits
-    _PREVIEW_CACHE[pid] = {"payload": payload.dict(), "fee": fee, "ts": time.time()}
-    return {
-        "txn_preview_id": pid,
-        "verified_account": len(re.sub(r"\D", "", target)) >= 7,
-        "limit_ok": payload.amount_value <= 50_000_000,
-        "to_account_masked": _mask(target),
-        "amount_value": payload.amount_value,
-        "fee": fee,
-        "total_debit": payload.amount_value + fee
-    }
+# =====================================================
+# ✅ NEW MINIMAL LOCKED TX ENDPOINT (replaces preview/execute flow)
+# Endpoint: POST /tx/request
+# Input:  {txn_id, from_acc, to_acc, trans_amount, memo, approved:"N"}
+# Output: {txn_id, approved:"Y"|"N", reply_text}
+# =====================================================
+@router.post("/tx/request")
+async def tx_request(payload: TxRequestIn):
+    try:
+        # 🔒 minimal validation
+        if payload.approved not in ("N", "Y"):
+            raise HTTPException(status_code=400, detail="approved must be 'N' or 'Y'")
+
+        if not (payload.txn_id or "").strip():
+            raise HTTPException(status_code=400, detail="txn_id missing")
+
+        if not (payload.from_acc or "").strip():
+            raise HTTPException(status_code=400, detail="from_acc missing")
+
+        if not (payload.to_acc or "").strip():
+            raise HTTPException(status_code=400, detail="to_acc missing")
+
+        if int(payload.trans_amount or 0) <= 0:
+            raise HTTPException(status_code=400, detail="trans_amount must be > 0")
+
+        # =================================================
+        # TODO: send payload to real core bank here.
+        # Keep minimal: only approve flag is needed.
+        # ok = await corebank_transfer(payload.dict())
+        # =================================================
+        ok = True
+
+        approved = "Y" if ok else "N"
+
+        return {
+            "txn_id": payload.txn_id,
+            "approved": approved,
+            "reply_text": SUCCESS_TXN_TEXT if approved == "Y" else "Гүйлгээ амжилтгүй боллоо.",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"tx_request crash: {type(e).__name__}: {e}")
 
 
-@router.post("/execute")
-async def execute_txn(payload: Dict[str, Any]):
-    prev_id = payload.get("txn_preview_id")
-    if not prev_id or prev_id not in _PREVIEW_CACHE:
-        raise HTTPException(status_code=400, detail="Invalid session")
-
-    # ✅ FINAL: success reply included
-    return {
-        "ok": True,
-        "transfer_id": f"TXN-{uuid.uuid4().hex[:6].upper()}",
-        "reply_text": SUCCESS_TXN_TEXT,
-    }
+# =====================================================
+# ⛔️ Old preview/execute flow removed (caused Invalid session)
+# =====================================================
